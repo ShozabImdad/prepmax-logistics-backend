@@ -1,0 +1,39 @@
+// Express app assembly. Kept separate from index.ts so tests can import the
+// app without starting a listener.
+
+import express, { type Request, type Response, type NextFunction } from "express";
+import cookieParser from "cookie-parser";
+import "./middleware/types.js"; // augments Express.Request
+import { loadAuth } from "./middleware/auth.js";
+import { authRouter } from "./modules/auth/routes.js";
+import { accountsRouter } from "./modules/accounts/routes.js";
+
+export function createApp() {
+  const app = express();
+
+  app.use(express.json());
+  app.use(cookieParser());
+
+  // Health check (no auth).
+  app.get("/health", (_req, res) => res.json({ ok: true, service: "prep-max-backend" }));
+
+  // Populate req.auth / req.db from the session cookie on every request.
+  app.use(loadAuth);
+
+  // Feature routers.
+  app.use("/api/auth", authRouter);
+  app.use("/api/accounts", accountsRouter);
+
+  // 404 for unknown API routes.
+  app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
+
+  // Central error handler.
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    const message = err instanceof Error ? err.message : "Internal error";
+    // Log full error server-side; return a safe message to the client.
+    console.error("[error]", err);
+    res.status(500).json({ error: message });
+  });
+
+  return app;
+}
