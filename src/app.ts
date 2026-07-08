@@ -8,6 +8,7 @@ import { loadAuth } from "./middleware/auth.js";
 import { authRouter } from "./modules/auth/routes.js";
 import { accountsRouter } from "./modules/accounts/routes.js";
 import { orderRouter, portalOrderRouter } from "./modules/orders/routes.js";
+import { documentRouter, portalDocumentRouter } from "./modules/documents/routes.js";
 
 export function createApp() {
   const app = express();
@@ -25,7 +26,9 @@ export function createApp() {
   app.use("/api/auth", authRouter);
   app.use("/api/accounts", accountsRouter);
   app.use("/api/orders", orderRouter);
+  app.use("/api/orders", documentRouter);          // /:publicId/awb.pdf, /receipt.pdf
   app.use("/api/portal/orders", portalOrderRouter);
+  app.use("/api/portal/orders", portalDocumentRouter); // /:publicId/receipt.pdf
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
