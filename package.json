@@ -12,6 +12,7 @@
     "migrate:status": "tsx src/scripts/migrate.ts status",
     "db:setup": "tsx src/scripts/setup-roles.ts",
     "seed": "tsx src/scripts/seed.ts",
+    "poll": "tsx src/tracking/poller.ts",
     "test": "tsx --test tests/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -20,6 +21,7 @@
     "cookie-parser": "^1.4.7",
     "express": "^4.21.2",
     "nanoid": "^5.0.9",
+    "patchright": "^1.61.1",
     "pg": "^8.13.1",
     "uuidv7": "^1.0.2",
     "zod": "^3.24.1"

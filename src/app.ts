@@ -7,6 +7,7 @@ import "./middleware/types.js"; // augments Express.Request
 import { loadAuth } from "./middleware/auth.js";
 import { authRouter } from "./modules/auth/routes.js";
 import { accountsRouter } from "./modules/accounts/routes.js";
+import { orderRouter, portalOrderRouter } from "./modules/orders/routes.js";
 
 export function createApp() {
   const app = express();
@@ -23,6 +24,8 @@ export function createApp() {
   // Feature routers.
   app.use("/api/auth", authRouter);
   app.use("/api/accounts", accountsRouter);
+  app.use("/api/orders", orderRouter);
+  app.use("/api/portal/orders", portalOrderRouter);
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
