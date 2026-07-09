@@ -8,7 +8,9 @@ type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
 export interface DocContact {
   name: string | null; company: string | null; phone: string | null; email: string | null;
-  address: string | null; city: string | null; country: string | null; postcode: string | null;
+  cnic: string | null; ntn: string | null;
+  address: string | null; address2: string | null; city: string | null; state: string | null;
+  country: string | null; postcode: string | null;
 }
 export interface DocItem {
   description: string; quantity: number; unitValue: number | null;
@@ -45,8 +47,12 @@ function contact(o: Record<string, unknown>, p: "sender" | "receiver"): DocConta
     company: (o[`${p}_company`] as string) ?? null,
     phone: (o[`${p}_phone`] as string) ?? null,
     email: (o[`${p}_email`] as string) ?? null,
+    cnic: (o[`${p}_cnic`] as string) ?? null,
+    ntn: (o[`${p}_ntn`] as string) ?? null,
     address: (o[`${p}_address`] as string) ?? null,
+    address2: (o[`${p}_address2`] as string) ?? null,
     city: (o[`${p}_city`] as string) ?? null,
+    state: (o[`${p}_state`] as string) ?? null,
     country: (o[`${p}_country`] as string) ?? null,
     postcode: (o[`${p}_postcode`] as string) ?? null,
   };
@@ -112,8 +118,8 @@ export async function loadDocData(run: Run, orderPublicId: string): Promise<DocD
       receiver: contact(o, "receiver"),
       serviceType: o.service_type,
       contentsNature: o.contents_nature,
-      declaredValue: o.declared_value != null ? Number(o.declared_value) : null,
-      currency: o.currency,
+      declaredValue: o.declared_total != null ? Number(o.declared_total) : null,
+      currency: o.declared_currency,
       duties: o.duties,
       handlingFlags: (o.handling_flags as string[]) ?? [],
       notes: o.notes,

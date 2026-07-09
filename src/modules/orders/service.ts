@@ -66,7 +66,7 @@ async function branchDivisor(sql: Sql, branchId: string): Promise<number> {
   return rows[0]?.volumetric_divisor ?? 5000;
 }
 
-async function insertBoxesAndItems(
+export async function insertBoxesAndItems(
   sql: Sql,
   orderId: string,
   branchId: string,
@@ -80,10 +80,10 @@ async function insertBoxesAndItems(
       divisor,
     );
     const { rows } = await sql.query<{ id: string }>(
-      `INSERT INTO boxes (order_id, branch_id, label, weight_kg, length_cm, width_cm, height_cm,
+      `INSERT INTO boxes (order_id, branch_id, label, parcel_type, weight_kg, length_cm, width_cm, height_cm,
                           volumetric_kg, chargeable_kg, sequence)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
-      [orderId, branchId, box.label ?? null, box.weightKg, box.lengthCm, box.widthCm, box.heightCm,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
+      [orderId, branchId, box.label ?? null, box.parcelType ?? "package", box.weightKg, box.lengthCm, box.widthCm, box.heightCm,
        w.volumetricKg, w.chargeableKg, seq++],
     );
     const boxId = rows[0]!.id;
@@ -125,31 +125,48 @@ export async function createOrder(
 
     const s = input.sender;
     const r = input.receiver;
+    // declared_total = sum of item declared values (customs).
+    const declaredTotal = input.boxes.reduce(
+      (sum, b) => sum + (b.items ?? []).reduce((s2, it) => s2 + (it.unitValue ?? 0) * (it.quantity ?? 1), 0),
+      0,
+    );
     const { rows } = await sql.query<{ id: string; public_id: string; tracking_code: string }>(
       `INSERT INTO orders (
           public_id, tracking_code, awb_number, branch_id, customer_id,
           order_status, created_via,
-          sender_name, sender_company, sender_phone, sender_email,
-          sender_address, sender_city, sender_country, sender_postcode,
-          receiver_name, receiver_company, receiver_phone, receiver_email,
-          receiver_address, receiver_city, receiver_country, receiver_postcode,
-          service_type, contents_nature, declared_value, currency, duties,
+          sender_name, sender_company, sender_phone, sender_email, sender_cnic, sender_ntn,
+          sender_address, sender_address2, sender_city, sender_state, sender_country, sender_postcode,
+          receiver_name, receiver_company, receiver_phone, receiver_email, receiver_cnic,
+          receiver_address, receiver_address2, receiver_city, receiver_state, receiver_country, receiver_postcode,
+          origin_country, destination_country,
+          service_type, service_level, contents_nature, duties,
+          price, price_currency, payment_status, amount_paid,
+          declared_total, declared_currency,
           handling_flags, notes, created_by
        ) VALUES (
           $1,$2,$3,$4,$5,$6,$7,
-          $8,$9,$10,$11,$12,$13,$14,$15,
-          $16,$17,$18,$19,$20,$21,$22,$23,
-          $24,$25,$26,$27,$28,$29,$30,$31
+          $8,$9,$10,$11,$12,$13,
+          $14,$15,$16,$17,$18,$19,
+          $20,$21,$22,$23,$24,
+          $25,$26,$27,$28,$29,$30,
+          $31,$32,
+          $33,$34,$35,$36,
+          $37,$38,$39,$40,
+          $41,$42,
+          $43,$44,$45
        ) RETURNING id, public_id, tracking_code`,
       [
         publicId(), trackingCode(), awbNumber(), branchId, customerId,
         orderStatus, createdVia,
-        s.name ?? null, s.company ?? null, s.phone ?? null, s.email || null,
-        s.address ?? null, s.city ?? null, s.country ?? null, s.postcode ?? null,
-        r.name ?? null, r.company ?? null, r.phone ?? null, r.email || null,
-        r.address ?? null, r.city ?? null, r.country ?? null, r.postcode ?? null,
-        input.serviceType ?? null, input.contentsNature ?? null, input.declaredValue ?? null,
-        input.currency, input.duties ?? null, input.handlingFlags, input.notes ?? null, createdBy,
+        s.name ?? null, s.company ?? null, s.phone ?? null, s.email || null, s.cnic ?? null, s.ntn ?? null,
+        s.address ?? null, s.address2 ?? null, s.city ?? null, s.state ?? null, s.country ?? null, s.postcode ?? null,
+        r.name ?? null, r.company ?? null, r.phone ?? null, r.email || null, r.cnic ?? null,
+        r.address ?? null, r.address2 ?? null, r.city ?? null, r.state ?? null, r.country ?? null, r.postcode ?? null,
+        input.originCountry ?? null, input.destinationCountry ?? null,
+        input.serviceType ?? null, input.serviceLevel ?? null, input.contentsNature ?? null, input.duties ?? null,
+        input.price ?? null, input.priceCurrency, input.paymentStatus ?? "unpaid", input.amountPaid ?? 0,
+        declaredTotal || null, input.declaredCurrency,
+        input.handlingFlags, input.notes ?? null, createdBy,
       ],
     );
     const order = rows[0]!;

@@ -14,7 +14,7 @@ import {
   requirePermission,
 } from "../../middleware/auth.js";
 import { isStaff, isCustomer } from "../auth/types.js";
-import { createOrderSchema, legSchema } from "./schema.js";
+import { createOrderSchema, editOrderSchema, legSchema } from "./schema.js";
 import { createOrder, OrderError, type Creator } from "./service.js";
 import {
   approveOrder,
@@ -23,6 +23,7 @@ import {
   listOrders,
   getOrderDetail,
   resolveOrderId,
+  editOrder,
 } from "./queries.js";
 import { syncOrder } from "../../tracking/sync.js";
 import { emitEvent } from "../notifications/events.js";
@@ -144,6 +145,25 @@ orderRouter.post(
         emitEvent({ kind: "order_activated", orderId: result.orderId, branchId: result.branchId });
       }
       return res.json({ ok: true, orderStatus: result.orderStatus, legCount: result.legCount });
+    } catch (err) {
+      return handleOrderError(err, res);
+    }
+  }),
+);
+
+// ── STAFF: edit an order ────────────────────────────────────────────────────
+orderRouter.patch(
+  "/:publicId",
+  requireStaff,
+  requirePermission("orders.edit"),
+  asyncHandler(async (req, res) => {
+    const parsed = editOrderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid edit", details: parsed.error.flatten() });
+    }
+    try {
+      await editOrder(req.db!, param(req.params.publicId), parsed.data);
+      return res.json({ ok: true });
     } catch (err) {
       return handleOrderError(err, res);
     }

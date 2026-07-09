@@ -2,8 +2,8 @@
 // detail. All run through the request's branch-context runner (RLS applied).
 
 import type { Sql } from "../../db/pool.js";
-import { OrderError, attachLegsInTx } from "./service.js";
-import type { LegInput } from "./schema.js";
+import { OrderError, attachLegsInTx, insertBoxesAndItems } from "./service.js";
+import type { LegInput, EditOrderInput } from "./schema.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -53,6 +53,100 @@ export async function cancelOrder(run: Run, orderPublicId: string): Promise<void
     if (order.order_status === "delivered") throw new OrderError(409, "Delivered orders cannot be cancelled");
     await sql.query("UPDATE orders SET order_status = 'cancelled' WHERE id = $1", [order.id]);
   });
+}
+
+/**
+ * Edit an order. Updates only the fields provided; when `boxes` is provided it
+ * replaces ALL boxes + items (recomputing volumetric/chargeable weight and the
+ * declared total). Runs in the branch context (RLS applies).
+ */
+export async function editOrder(
+  run: Run,
+  orderPublicId: string,
+  input: EditOrderInput,
+  divisorFallback = 5000,
+): Promise<void> {
+  await run(async (sql) => {
+    const order = await findOrderIdByPublicId(sql, orderPublicId);
+    if (!order) throw new OrderError(404, "Order not found");
+
+    // Build a dynamic SET clause from provided fields. Map camelCase → column.
+    const set: string[] = [];
+    const vals: unknown[] = [];
+    const push = (col: string, v: unknown) => { vals.push(v); set.push(`${col} = $${vals.length}`); };
+
+    const s = input.sender;
+    if (s) {
+      if (s.name !== undefined) push("sender_name", s.name || null);
+      if (s.company !== undefined) push("sender_company", s.company || null);
+      if (s.phone !== undefined) push("sender_phone", s.phone || null);
+      if (s.email !== undefined) push("sender_email", s.email || null);
+      if (s.cnic !== undefined) push("sender_cnic", s.cnic || null);
+      if (s.ntn !== undefined) push("sender_ntn", s.ntn || null);
+      if (s.address !== undefined) push("sender_address", s.address || null);
+      if (s.address2 !== undefined) push("sender_address2", s.address2 || null);
+      if (s.city !== undefined) push("sender_city", s.city || null);
+      if (s.state !== undefined) push("sender_state", s.state || null);
+      if (s.country !== undefined) push("sender_country", s.country || null);
+      if (s.postcode !== undefined) push("sender_postcode", s.postcode || null);
+    }
+    const r = input.receiver;
+    if (r) {
+      if (r.name !== undefined) push("receiver_name", r.name || null);
+      if (r.company !== undefined) push("receiver_company", r.company || null);
+      if (r.phone !== undefined) push("receiver_phone", r.phone || null);
+      if (r.email !== undefined) push("receiver_email", r.email || null);
+      if (r.cnic !== undefined) push("receiver_cnic", r.cnic || null);
+      if (r.address !== undefined) push("receiver_address", r.address || null);
+      if (r.address2 !== undefined) push("receiver_address2", r.address2 || null);
+      if (r.city !== undefined) push("receiver_city", r.city || null);
+      if (r.state !== undefined) push("receiver_state", r.state || null);
+      if (r.country !== undefined) push("receiver_country", r.country || null);
+      if (r.postcode !== undefined) push("receiver_postcode", r.postcode || null);
+    }
+    if (input.originCountry !== undefined) push("origin_country", input.originCountry || null);
+    if (input.destinationCountry !== undefined) push("destination_country", input.destinationCountry || null);
+    if (input.serviceType !== undefined) push("service_type", input.serviceType || null);
+    if (input.serviceLevel !== undefined) push("service_level", input.serviceLevel || null);
+    if (input.contentsNature !== undefined) push("contents_nature", input.contentsNature || null);
+    if (input.duties !== undefined) push("duties", input.duties || null);
+    if (input.handlingFlags !== undefined) push("handling_flags", input.handlingFlags);
+    if (input.notes !== undefined) push("notes", input.notes || null);
+    if (input.price !== undefined) push("price", input.price ?? null);
+    if (input.priceCurrency !== undefined) push("price_currency", input.priceCurrency || null);
+    if (input.paymentStatus !== undefined) push("payment_status", input.paymentStatus);
+    if (input.amountPaid !== undefined) push("amount_paid", input.amountPaid ?? 0);
+    if (input.declaredCurrency !== undefined) push("declared_currency", input.declaredCurrency || null);
+
+    // If boxes are being replaced, recompute the declared total from them.
+    if (input.boxes) {
+      const declaredTotal = input.boxes.reduce(
+        (sum, b) => sum + (b.items ?? []).reduce((s2, it) => s2 + (it.unitValue ?? 0) * (it.quantity ?? 1), 0),
+        0,
+      );
+      push("declared_total", declaredTotal || null);
+    }
+
+    if (set.length > 0) {
+      vals.push(order.id);
+      await sql.query(`UPDATE orders SET ${set.join(", ")} WHERE id = $${vals.length}`, vals);
+    }
+
+    // Replace boxes + items if provided.
+    if (input.boxes) {
+      const divisor = await branchDivisor(sql, order.branch_id, divisorFallback);
+      await sql.query("DELETE FROM boxes WHERE order_id = $1", [order.id]); // cascades items
+      await insertBoxesAndItems(sql, order.id, order.branch_id, input.boxes, divisor);
+    }
+  });
+}
+
+async function branchDivisor(sql: Sql, branchId: string, fallback: number): Promise<number> {
+  const { rows } = await sql.query<{ volumetric_divisor: number }>(
+    "SELECT volumetric_divisor FROM branches WHERE id = $1",
+    [branchId],
+  );
+  return rows[0]?.volumetric_divisor ?? fallback;
 }
 
 /**
@@ -175,7 +269,7 @@ export async function getOrderDetail(
     if (!order) return null;
 
     const boxes = await sql.query(
-      `SELECT id, label, weight_kg, length_cm, width_cm, height_cm, volumetric_kg, chargeable_kg, sequence
+      `SELECT id, label, parcel_type, weight_kg, length_cm, width_cm, height_cm, volumetric_kg, chargeable_kg, sequence
          FROM boxes WHERE order_id = $1 ORDER BY sequence`,
       [order.id],
     );
@@ -203,6 +297,7 @@ export async function getOrderDetail(
 
     const boxesOut = boxes.rows.map((b) => ({
       label: b.label,
+      parcelType: b.parcel_type,
       weightKg: Number(b.weight_kg),
       lengthCm: Number(b.length_cm),
       widthCm: Number(b.width_cm),
@@ -229,21 +324,26 @@ export async function getOrderDetail(
       lastSyncedAt: order.last_synced_at,
       sender: opts.forCustomer ? undefined : {
         name: order.sender_name, company: order.sender_company, phone: order.sender_phone,
-        email: order.sender_email, address: order.sender_address, city: order.sender_city,
-        country: order.sender_country, postcode: order.sender_postcode,
+        email: order.sender_email, cnic: order.sender_cnic, ntn: order.sender_ntn,
+        address: order.sender_address, address2: order.sender_address2, city: order.sender_city,
+        state: order.sender_state, country: order.sender_country, postcode: order.sender_postcode,
       },
       receiver: {
         name: order.receiver_name, city: order.receiver_city, country: order.receiver_country,
         // full receiver contact only for staff
         ...(opts.forCustomer ? {} : {
           company: order.receiver_company, phone: order.receiver_phone, email: order.receiver_email,
-          address: order.receiver_address, postcode: order.receiver_postcode,
+          cnic: order.receiver_cnic, address: order.receiver_address, address2: order.receiver_address2,
+          state: order.receiver_state, postcode: order.receiver_postcode,
         }),
       },
+      originCountry: order.origin_country,
+      destinationCountry: order.destination_country,
       serviceType: order.service_type,
+      serviceLevel: order.service_level,
       contentsNature: order.contents_nature,
-      declaredValue: order.declared_value != null ? Number(order.declared_value) : null,
-      currency: order.currency,
+      declaredTotal: order.declared_total != null ? Number(order.declared_total) : null,
+      declaredCurrency: order.declared_currency,
       duties: order.duties,
       handlingFlags: order.handling_flags,
       boxes: boxesOut,
@@ -262,6 +362,11 @@ export async function getOrderDetail(
     if (!opts.forCustomer) {
       base.awbNumber = order.awb_number;
       base.createdVia = order.created_via;
+      // pricing / finance (staff only)
+      base.price = order.price != null ? Number(order.price) : null;
+      base.priceCurrency = order.price_currency;
+      base.paymentStatus = order.payment_status;
+      base.amountPaid = order.amount_paid != null ? Number(order.amount_paid) : null;
       base.legs = legs.rows.map((l) => ({
         carrier: l.carrier, trackingNumber: l.carrier_tracking_number,
         sequence: l.sequence, isActive: l.is_active,
