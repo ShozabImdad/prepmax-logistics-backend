@@ -40,7 +40,10 @@ accountsRouter.post(
       );
       return rows[0];
     });
-    return res.status(201).json({ branch: row });
+    // camelCase to match the list endpoint + frontend contract.
+    return res.status(201).json({
+      branch: { publicId: row.public_id, name: row.name, city: row.city, isActive: row.is_active },
+    });
   }),
 );
 
@@ -83,7 +86,7 @@ accountsRouter.post(
            ON CONFLICT DO NOTHING`,
           [newUser.id],
         );
-        return { public_id: newUser.public_id, email: newUser.email, full_name: newUser.full_name, branch_id: newUser.branch_id };
+        return { publicId: newUser.public_id, email: newUser.email, fullName: newUser.full_name };
       });
       return res.status(201).json({ manager: row });
     } catch (err) {
@@ -143,12 +146,72 @@ accountsRouter.post(
           [publicId(), branchId, parsed.data.fullName, parsed.data.email, parsed.data.phone ?? null, hash,
            parsed.data.companyName ?? null, parsed.data.ntn ?? null, parsed.data.address ?? null],
         );
-        return rows[0];
+        const c = rows[0];
+        return {
+          publicId: c.public_id, fullName: c.full_name, email: c.email, phone: c.phone,
+          companyName: c.company_name, ntn: c.ntn, address: c.address,
+        };
       });
       return res.status(201).json({ customer: row });
     } catch (err) {
       return handleError(err, res, "A customer with that email already exists in this branch");
     }
+  }),
+);
+
+// ── List branches (super-admin sees all; managers see their own) ────────────
+accountsRouter.get(
+  "/branches",
+  requireStaff,
+  asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    const rows = await withSuperAdminAllBranches(async (sql) => {
+      const where = staff.role === "branch_manager" ? "WHERE id = $1" : "";
+      const params = staff.role === "branch_manager" ? [staff.branchId] : [];
+      const r = await sql.query(
+        `SELECT public_id, name, city, is_active, volumetric_divisor, created_at
+           FROM branches ${where} ORDER BY name`,
+        params,
+      );
+      return r.rows;
+    });
+    return res.json({
+      branches: rows.map((b) => ({
+        publicId: b.public_id, name: b.name, city: b.city, isActive: b.is_active,
+        volumetricDivisor: b.volumetric_divisor, createdAt: b.created_at,
+      })),
+    });
+  }),
+);
+
+// ── List customers (branch-scoped via req.db / RLS) ─────────────────────────
+accountsRouter.get(
+  "/customers",
+  requireStaff,
+  requirePermission("customers.view"),
+  asyncHandler(async (req, res) => {
+    const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const rows = await req.db!(async (sql) => {
+      const params: unknown[] = [];
+      let where = "";
+      if (search) {
+        params.push(`%${search}%`);
+        where = `WHERE full_name ILIKE $1 OR email ILIKE $1 OR COALESCE(company_name,'') ILIKE $1`;
+      }
+      const r = await sql.query(
+        `SELECT public_id, full_name, email, phone, company_name, ntn, address, is_active, created_at
+           FROM customers ${where} ORDER BY created_at DESC LIMIT 200`,
+        params,
+      );
+      return r.rows;
+    });
+    return res.json({
+      customers: rows.map((c) => ({
+        publicId: c.public_id, fullName: c.full_name, email: c.email, phone: c.phone,
+        companyName: c.company_name, ntn: c.ntn, address: c.address, isActive: c.is_active, createdAt: c.created_at,
+      })),
+    });
   }),
 );
 

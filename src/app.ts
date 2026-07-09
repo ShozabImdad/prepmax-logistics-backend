@@ -12,6 +12,7 @@ import { documentRouter, portalDocumentRouter } from "./modules/documents/routes
 import { notificationRouter } from "./modules/notifications/routes.js";
 import { publicTrackingRouter } from "./modules/tracking/routes.js";
 import { publicAccountRequestRouter, accountRequestRouter } from "./modules/account-requests/routes.js";
+import { permissionsRouter } from "./modules/permissions/routes.js";
 
 export function createApp() {
   const app = express();
@@ -38,6 +39,7 @@ export function createApp() {
   app.use("/api/portal/orders", portalDocumentRouter); // /:publicId/receipt.pdf
   app.use("/api/notifications", notificationRouter);
   app.use("/api/account-requests", accountRequestRouter); // staff GET/status (public POST mounted above)
+  app.use("/api/permissions", permissionsRouter);
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
