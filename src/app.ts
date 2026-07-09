@@ -11,6 +11,7 @@ import { orderRouter, portalOrderRouter } from "./modules/orders/routes.js";
 import { documentRouter, portalDocumentRouter } from "./modules/documents/routes.js";
 import { notificationRouter } from "./modules/notifications/routes.js";
 import { publicTrackingRouter } from "./modules/tracking/routes.js";
+import { publicAccountRequestRouter, accountRequestRouter } from "./modules/account-requests/routes.js";
 
 export function createApp() {
   const app = express();
@@ -21,9 +22,9 @@ export function createApp() {
   // Health check (no auth).
   app.get("/health", (_req, res) => res.json({ ok: true, service: "prep-max-backend" }));
 
-  // Public tracking (no auth) — mounted before loadAuth isn't required, but
-  // kept here to signal it's a public, unauthenticated endpoint.
+  // Public endpoints (no auth).
   app.use("/api/track", publicTrackingRouter);
+  app.use("/api/account-requests", publicAccountRequestRouter);
 
   // Populate req.auth / req.db from the session cookie on every request.
   app.use(loadAuth);
@@ -36,6 +37,7 @@ export function createApp() {
   app.use("/api/portal/orders", portalOrderRouter);
   app.use("/api/portal/orders", portalDocumentRouter); // /:publicId/receipt.pdf
   app.use("/api/notifications", notificationRouter);
+  app.use("/api/account-requests", accountRequestRouter); // staff GET/status (public POST mounted above)
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
