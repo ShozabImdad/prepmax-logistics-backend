@@ -4,10 +4,13 @@ import { createApp } from "./app.js";
 import { config } from "./config/env.js";
 import { closePool } from "./db/pool.js";
 import { closePdfBrowser } from "./modules/documents/pdf.js";
+import { verifyMailer } from "./modules/notifications/mailer.js";
 
 const app = createApp();
 const server = app.listen(config.port, () => {
   console.log(`\n  Prep Max backend listening on http://localhost:${config.port}\n`);
+  // One-time SMTP check (logs LOG-ONLY mode if not configured).
+  void verifyMailer();
 });
 
 async function shutdown() {

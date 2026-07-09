@@ -25,6 +25,7 @@ import {
   resolveOrderId,
 } from "./queries.js";
 import { syncOrder } from "../../tracking/sync.js";
+import { emitEvent } from "../notifications/events.js";
 
 function handleOrderError(err: unknown, res: Response): void {
   if (err instanceof OrderError) {
@@ -61,7 +62,9 @@ orderRouter.post(
     };
     try {
       const result = await createOrder(req.db!, creator, parsed.data);
-      return res.status(201).json({ order: result });
+      // Emit AFTER the create transaction has committed (non-blocking).
+      emitEvent({ kind: "order_created", orderId: result.orderId, branchId: result.branchId, createdVia: result.createdVia });
+      return res.status(201).json({ order: { publicId: result.publicId, trackingCode: result.trackingCode, orderStatus: result.orderStatus } });
     } catch (err) {
       return handleOrderError(err, res);
     }
@@ -101,7 +104,8 @@ orderRouter.post(
     const staff = req.auth!;
     if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
     try {
-      await approveOrder(req.db!, param(req.params.publicId), staff.userId);
+      const { orderId, branchId } = await approveOrder(req.db!, param(req.params.publicId), staff.userId);
+      emitEvent({ kind: "order_approved", orderId, branchId });
       return res.json({ ok: true, orderStatus: "awaiting_carrier" });
     } catch (err) {
       return handleOrderError(err, res);
@@ -135,7 +139,11 @@ orderRouter.post(
     if (!parsed.success) return res.status(400).json({ error: "legs[] (1-2) required" });
     try {
       const result = await attachLegs(req.db!, param(req.params.publicId), parsed.data.legs);
-      return res.json({ ok: true, ...result });
+      // When the first leg activates the order, notify the customer it's now trackable.
+      if (result.justActivated) {
+        emitEvent({ kind: "order_activated", orderId: result.orderId, branchId: result.branchId });
+      }
+      return res.json({ ok: true, orderStatus: result.orderStatus, legCount: result.legCount });
     } catch (err) {
       return handleOrderError(err, res);
     }
@@ -170,7 +178,11 @@ portalOrderRouter.post(
     const creator: Creator = { kind: "customer", customerId: cust.customerId, branchId: cust.branchId };
     try {
       const result = await createOrder(req.db!, creator, parsed.data);
-      return res.status(201).json({ order: result, message: "Booking request submitted for branch approval" });
+      emitEvent({ kind: "order_created", orderId: result.orderId, branchId: result.branchId, createdVia: result.createdVia });
+      return res.status(201).json({
+        order: { publicId: result.publicId, trackingCode: result.trackingCode, orderStatus: result.orderStatus },
+        message: "Booking request submitted for branch approval",
+      });
     } catch (err) {
       return handleOrderError(err, res);
     }

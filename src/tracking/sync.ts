@@ -15,6 +15,7 @@ import type { Sql } from "../db/pool.js";
 import { pool } from "../db/pool.js";
 import { resolveAdapter } from "./adapters/index.js";
 import { detectHandoff } from "./adapters/handoff.js";
+import { emitEvent } from "../modules/notifications/events.js";
 import type { NormalizedTracking, TrackingEvent } from "./adapters/types.js";
 
 // Terminal statuses we stop polling.
@@ -206,6 +207,14 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       ? await maybeCreateHandoffLeg(sql, leg, result)
       : null;
 
+    // Read the previous cached status so we only fire lifecycle events on a
+    // real transition (not on every poll while it stays delivered/exception).
+    const prev = await sql.query<{ current_status: string | null }>(
+      "SELECT current_status FROM orders WHERE id = $1",
+      [orderId],
+    );
+    const prevStatus = prev.rows[0]?.current_status ?? null;
+
     // Update cached status on the order.
     const orderStatus = result.status === "delivered" ? "delivered" : undefined;
     await sql.query(
@@ -217,6 +226,15 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         WHERE id = $1`,
       [orderId, result.status, result.statusText],
     );
+
+    // Fire lifecycle events on transition into delivered / exception.
+    if (result.status !== prevStatus) {
+      if (result.status === "delivered") {
+        emitEvent({ kind: "order_delivered", orderId, branchId: leg.branchId });
+      } else if (result.status === "exception") {
+        emitEvent({ kind: "order_exception", orderId, branchId: leg.branchId, statusText: result.statusText });
+      }
+    }
 
     return {
       orderId,

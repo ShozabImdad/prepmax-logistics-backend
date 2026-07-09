@@ -30,8 +30,8 @@ async function findOrderIdByPublicId(sql: Sql, orderPublicId: string): Promise<{
  * Approve a customer booking request: pending_approval -> awaiting_carrier.
  * Only meaningful for customer-created orders awaiting review.
  */
-export async function approveOrder(run: Run, orderPublicId: string, approverUserId: string): Promise<void> {
-  await run(async (sql) => {
+export async function approveOrder(run: Run, orderPublicId: string, approverUserId: string): Promise<{ orderId: string; branchId: string }> {
+  return run(async (sql) => {
     const order = await findOrderIdByPublicId(sql, orderPublicId);
     if (!order) throw new OrderError(404, "Order not found");
     if (order.order_status !== "pending_approval") {
@@ -41,6 +41,7 @@ export async function approveOrder(run: Run, orderPublicId: string, approverUser
       "UPDATE orders SET order_status = 'awaiting_carrier', approved_by = $2 WHERE id = $1",
       [order.id, approverUserId],
     );
+    return { orderId: order.id, branchId: order.branch_id };
   });
 }
 
@@ -59,7 +60,7 @@ export async function cancelOrder(run: Run, orderPublicId: string): Promise<void
  * OR later). When the first leg is attached and the order is awaiting_carrier,
  * it moves to 'active' (tracking begins). Max 2 legs total.
  */
-export async function attachLegs(run: Run, orderPublicId: string, legs: LegInput[]): Promise<{ orderStatus: string; legCount: number }> {
+export async function attachLegs(run: Run, orderPublicId: string, legs: LegInput[]): Promise<{ orderStatus: string; legCount: number; orderId: string; branchId: string; justActivated: boolean }> {
   return run(async (sql) => {
     const order = await findOrderIdByPublicId(sql, orderPublicId);
     if (!order) throw new OrderError(404, "Order not found");
@@ -81,11 +82,13 @@ export async function attachLegs(run: Run, orderPublicId: string, legs: LegInput
 
     // First leg activates tracking.
     let newStatus = order.order_status;
+    let justActivated = false;
     if (order.order_status === "awaiting_carrier") {
       await sql.query("UPDATE orders SET order_status = 'active' WHERE id = $1", [order.id]);
       newStatus = "active";
+      justActivated = true;
     }
-    return { orderStatus: newStatus, legCount: currentCount + legs.length };
+    return { orderStatus: newStatus, legCount: currentCount + legs.length, orderId: order.id, branchId: order.branch_id, justActivated };
   });
 }
 

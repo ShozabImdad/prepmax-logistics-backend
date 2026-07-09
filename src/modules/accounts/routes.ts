@@ -98,6 +98,10 @@ const customerInput = z.object({
   password: z.string().min(8),
   fullName: z.string().min(1),
   phone: z.string().optional(),
+  // Business fields (all optional per client): company, NTN (tax no.), address.
+  companyName: z.string().optional(),
+  ntn: z.string().optional(),
+  address: z.string().optional(),
   // super-admin may target a branch; managers always use their own
   branchPublicId: z.string().optional(),
 });
@@ -132,10 +136,12 @@ accountsRouter.post(
           branchId = b.rows[0].id;
         }
         const { rows } = await sql.query(
-          `INSERT INTO customers (public_id, branch_id, full_name, email, phone, password_hash)
-           VALUES ($1,$2,$3,$4,$5,$6)
-           RETURNING public_id, full_name, email, phone`,
-          [publicId(), branchId, parsed.data.fullName, parsed.data.email, parsed.data.phone ?? null, hash],
+          `INSERT INTO customers (public_id, branch_id, full_name, email, phone, password_hash,
+                                  company_name, ntn, address)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           RETURNING public_id, full_name, email, phone, company_name, ntn, address`,
+          [publicId(), branchId, parsed.data.fullName, parsed.data.email, parsed.data.phone ?? null, hash,
+           parsed.data.companyName ?? null, parsed.data.ntn ?? null, parsed.data.address ?? null],
         );
         return rows[0];
       });

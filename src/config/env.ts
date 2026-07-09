@@ -68,6 +68,23 @@ export const config = {
   port: Number(optional("PORT", "4000")),
   sessionSecret: optional("SESSION_SECRET", "dev-insecure-change-me"),
 
+  // Email (Nodemailer SMTP). When SMTP_HOST + SMTP_USER + SMTP_PASS are all
+  // set, real email is sent through that relay (e.g. Brevo). When any is
+  // missing, the mailer runs in LOG-ONLY mode: emails are rendered + recorded
+  // in email_log but not transmitted (safe for dev). Swap providers by
+  // changing these four values — no code change.
+  smtp: {
+    host: optional("SMTP_HOST", ""),
+    port: Number(optional("SMTP_PORT", "587")),
+    user: optional("SMTP_USER", ""),
+    pass: optional("SMTP_PASS", ""),
+    // "true" for port 465 (implicit TLS); false for 587 (STARTTLS).
+    secure: optional("SMTP_SECURE", "false") === "true",
+  },
+  mailFrom: optional("MAIL_FROM", "Prep Max Logistics <no-reply@example.com>"),
+  // Base URL of the customer portal, used to build tracking links in emails.
+  portalBaseUrl: optional("PORTAL_BASE_URL", "http://localhost:3000"),
+
   // Admin/superuser connection — for role setup only.
   adminDb: {
     host: optional("PGADMIN_HOST", "localhost"),

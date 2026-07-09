@@ -111,7 +111,7 @@ export async function createOrder(
   run: <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>,
   creator: Creator,
   input: CreateOrderInput,
-): Promise<{ publicId: string; trackingCode: string; orderStatus: string }> {
+): Promise<{ publicId: string; trackingCode: string; orderStatus: string; orderId: string; branchId: string; createdVia: "customer" | "staff" }> {
   if (creator.kind === "customer" && input.legs && input.legs.length > 0) {
     throw new OrderError(403, "Customers cannot attach carrier legs");
   }
@@ -161,7 +161,10 @@ export async function createOrder(
       await attachLegsInTx(sql, order.id, branchId, input.legs);
     }
 
-    return { publicId: order.public_id, trackingCode: order.tracking_code, orderStatus };
+    return {
+      publicId: order.public_id, trackingCode: order.tracking_code, orderStatus,
+      orderId: order.id, branchId, createdVia,
+    };
   });
 }
 
