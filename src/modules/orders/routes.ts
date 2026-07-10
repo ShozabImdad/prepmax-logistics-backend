@@ -81,7 +81,8 @@ orderRouter.get(
   asyncHandler(async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     const search = typeof req.query.q === "string" ? req.query.q : undefined;
-    const orders = await listOrders(req.db!, { status, search });
+    const createdVia = typeof req.query.createdVia === "string" ? req.query.createdVia : undefined;
+    const orders = await listOrders(req.db!, { status, createdVia, search });
     return res.json({ orders });
   }),
 );
@@ -213,8 +214,16 @@ portalOrderRouter.post(
     const cust = req.auth!;
     if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
     const creator: Creator = { kind: "customer", customerId: cust.customerId, branchId: cust.branchId };
+    // Customers submit a booking REQUEST — they don't set what the vendor
+    // charges. Strip pricing/payment so only staff can price an order.
+    const bookingInput = {
+      ...parsed.data,
+      price: undefined,
+      paymentStatus: undefined,
+      amountPaid: undefined,
+    };
     try {
-      const result = await createOrder(req.db!, creator, parsed.data);
+      const result = await createOrder(req.db!, creator, bookingInput);
       emitEvent({ kind: "order_created", orderId: result.orderId, branchId: result.branchId, createdVia: result.createdVia });
       return res.status(201).json({
         order: { publicId: result.publicId, trackingCode: result.trackingCode, orderStatus: result.orderStatus },

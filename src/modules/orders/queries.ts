@@ -208,6 +208,7 @@ export interface OrderListRow {
   currentStatus: string | null;
   receiverCity: string | null;
   receiverCountry: string | null;
+  createdVia: string;           // "customer" | "staff" — flags booking requests
   createdAt: string;
 }
 
@@ -218,7 +219,7 @@ export interface OrderListRow {
  */
 export async function listOrders(
   run: Run,
-  opts: { customerId?: string; status?: string; search?: string; limit?: number; offset?: number },
+  opts: { customerId?: string; status?: string; createdVia?: string; search?: string; limit?: number; offset?: number },
 ): Promise<OrderListRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
@@ -230,6 +231,10 @@ export async function listOrders(
     if (opts.status) {
       params.push(opts.status);
       conds.push(`order_status = $${params.length}`);
+    }
+    if (opts.createdVia) {
+      params.push(opts.createdVia);
+      conds.push(`created_via = $${params.length}`);
     }
     const search = opts.search?.trim();
     if (search) {
@@ -258,7 +263,7 @@ export async function listOrders(
 
     const { rows } = await sql.query(
       `SELECT public_id, tracking_code, order_status, current_status,
-              receiver_city, receiver_country, created_at
+              receiver_city, receiver_country, created_via, created_at
          FROM orders ${where}
          ORDER BY created_at DESC
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -271,6 +276,7 @@ export async function listOrders(
       currentStatus: r.current_status,
       receiverCity: r.receiver_city,
       receiverCountry: r.receiver_country,
+      createdVia: r.created_via,
       createdAt: r.created_at,
     }));
   });
