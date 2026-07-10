@@ -8,6 +8,7 @@
 // data, sender/cost basis, or raw carrier tracking numbers.
 
 import { pool } from "../../db/pool.js";
+import { redactCarrier } from "./sanitize.js";
 
 export interface PublicTrackingEvent {
   timestamp: string | null;
@@ -75,10 +76,12 @@ export async function publicTrack(trackingCode: string): Promise<PublicTracking 
       estimatedDelivery: null, // not yet captured as a structured field
       lastUpdated: order.last_synced_at,
       pieceCount: pieces.rows[0]?.n ?? 0,
+      // Redact carrier branding (DPD/DHL/UPS/... leak in via carriers' own
+      // location/description fields) — customers must not see the real carrier.
       events: events.rows.map((e) => ({
         timestamp: e.event_time ? new Date(e.event_time).toISOString() : (e.event_time_raw ?? null),
-        location: e.location,
-        description: e.description,
+        location: redactCarrier(e.location),
+        description: redactCarrier(e.description) ?? "Shipment update",
       })),
     };
   } catch (e) {
