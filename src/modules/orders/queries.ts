@@ -56,6 +56,19 @@ export async function cancelOrder(run: Run, orderPublicId: string): Promise<void
 }
 
 /**
+ * Permanently delete an order. Boxes, box_items, shipment_legs, and
+ * tracking_events all ON DELETE CASCADE from orders, so this one statement
+ * removes the whole order graph. Runs in the branch context (RLS applies).
+ */
+export async function deleteOrder(run: Run, orderPublicId: string): Promise<void> {
+  await run(async (sql) => {
+    const order = await findOrderIdByPublicId(sql, orderPublicId);
+    if (!order) throw new OrderError(404, "Order not found");
+    await sql.query("DELETE FROM orders WHERE id = $1", [order.id]);
+  });
+}
+
+/**
  * Edit an order. Updates only the fields provided; when `boxes` is provided it
  * replaces ALL boxes + items (recomputing volumetric/chargeable weight and the
  * declared total). Runs in the branch context (RLS applies).
@@ -205,7 +218,7 @@ export interface OrderListRow {
  */
 export async function listOrders(
   run: Run,
-  opts: { customerId?: string; status?: string; limit?: number; offset?: number },
+  opts: { customerId?: string; status?: string; search?: string; limit?: number; offset?: number },
 ): Promise<OrderListRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
@@ -217,6 +230,25 @@ export async function listOrders(
     if (opts.status) {
       params.push(opts.status);
       conds.push(`order_status = $${params.length}`);
+    }
+    const search = opts.search?.trim();
+    if (search) {
+      params.push(`%${search}%`);
+      const p = `$${params.length}`;
+      // Match across tracking, AWB, both parties' names/companies, and the
+      // origin/destination location fields — one ILIKE pattern reused for all.
+      conds.push(`(
+        tracking_code ILIKE ${p}
+        OR COALESCE(awb_number, '') ILIKE ${p}
+        OR COALESCE(receiver_name, '') ILIKE ${p}
+        OR COALESCE(receiver_company, '') ILIKE ${p}
+        OR COALESCE(receiver_city, '') ILIKE ${p}
+        OR COALESCE(receiver_country, '') ILIKE ${p}
+        OR COALESCE(sender_name, '') ILIKE ${p}
+        OR COALESCE(sender_company, '') ILIKE ${p}
+        OR COALESCE(sender_city, '') ILIKE ${p}
+        OR COALESCE(sender_country, '') ILIKE ${p}
+      )`);
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     params.push(Math.min(opts.limit ?? 50, 200));

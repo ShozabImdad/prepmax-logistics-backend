@@ -19,6 +19,7 @@ import { createOrder, OrderError, type Creator } from "./service.js";
 import {
   approveOrder,
   cancelOrder,
+  deleteOrder,
   attachLegs,
   listOrders,
   getOrderDetail,
@@ -79,7 +80,8 @@ orderRouter.get(
   requirePermission("orders.view"),
   asyncHandler(async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
-    const orders = await listOrders(req.db!, { status });
+    const search = typeof req.query.q === "string" ? req.query.q : undefined;
+    const orders = await listOrders(req.db!, { status, search });
     return res.json({ orders });
   }),
 );
@@ -123,6 +125,21 @@ orderRouter.post(
     try {
       await cancelOrder(req.db!, param(req.params.publicId));
       return res.json({ ok: true, orderStatus: "cancelled" });
+    } catch (err) {
+      return handleOrderError(err, res);
+    }
+  }),
+);
+
+// ── STAFF: delete an order permanently (cascade) ────────────────────────────
+orderRouter.delete(
+  "/:publicId",
+  requireStaff,
+  requirePermission("orders.delete"),
+  asyncHandler(async (req, res) => {
+    try {
+      await deleteOrder(req.db!, param(req.params.publicId));
+      return res.json({ ok: true });
     } catch (err) {
       return handleOrderError(err, res);
     }

@@ -15,13 +15,22 @@ export const staffRouter: Router = Router();
 staffRouter.get(
   "/",
   requireSuperAdmin,
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const rows = await withSuperAdminAllBranches(async (sql) => {
+      const params: unknown[] = [];
+      let where = "";
+      if (search) {
+        params.push(`%${search}%`);
+        where = `WHERE u.full_name ILIKE $1 OR u.email ILIKE $1 OR COALESCE(b.name,'') ILIKE $1 OR COALESCE(b.city,'') ILIKE $1`;
+      }
       const users = await sql.query(
         `SELECT u.id, u.public_id, u.full_name, u.email, u.role, u.is_active, u.created_at,
                 b.name AS branch_name, b.public_id AS branch_public_id
            FROM users u LEFT JOIN branches b ON b.id = u.branch_id
+           ${where}
           ORDER BY u.role, u.full_name`,
+        params,
       );
       // roles per user
       const roleRows = await sql.query<{ user_id: string; role_id: string; name: string }>(

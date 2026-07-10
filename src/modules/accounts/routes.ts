@@ -292,9 +292,19 @@ accountsRouter.get(
   asyncHandler(async (req, res) => {
     const staff = req.auth!;
     if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
     const rows = await withSuperAdminAllBranches(async (sql) => {
-      const where = staff.role === "branch_manager" ? "WHERE id = $1" : "";
-      const params = staff.role === "branch_manager" ? [staff.branchId] : [];
+      const conds: string[] = [];
+      const params: unknown[] = [];
+      if (staff.role === "branch_manager") {
+        params.push(staff.branchId);
+        conds.push(`id = $${params.length}`);
+      }
+      if (search) {
+        params.push(`%${search}%`);
+        conds.push(`(name ILIKE $${params.length} OR city ILIKE $${params.length})`);
+      }
+      const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
       const r = await sql.query(
         `SELECT public_id, name, city, is_active, volumetric_divisor, created_at
            FROM branches ${where} ORDER BY name`,
