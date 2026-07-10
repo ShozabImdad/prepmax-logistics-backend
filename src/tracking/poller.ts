@@ -10,6 +10,7 @@
 //   - delivered / cancelled / pending_approval / awaiting_carrier : never
 //     (terminal, or nothing to track yet)
 
+import { pathToFileURL } from "node:url";
 import { pool, closePool } from "../db/pool.js";
 import { syncOrder, type SyncResult } from "./sync.js";
 import { closeDhlBrowser } from "./adapters/dhl.js";
@@ -125,7 +126,14 @@ export function startPoller(intervalMinutes = 5): { stop: () => void } {
 }
 
 // Standalone entry: `npm run poll` runs cycles until interrupted.
-if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}`) {
+// Detect "run as main" via pathToFileURL (robust across relative/absolute argv
+// and process managers like PM2), or an explicit RUN_POLLER=1 override.
+const runAsMain =
+  process.env.RUN_POLLER === "1" ||
+  (process.argv[1] !== undefined &&
+    import.meta.url === pathToFileURL(process.argv[1]).href);
+
+if (runAsMain) {
   const handle = startPoller(Number(process.env.POLL_INTERVAL_MINUTES ?? 5));
   const shutdown = async () => {
     handle.stop();
