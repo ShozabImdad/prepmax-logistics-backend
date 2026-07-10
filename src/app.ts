@@ -13,6 +13,7 @@ import { notificationRouter } from "./modules/notifications/routes.js";
 import { publicTrackingRouter } from "./modules/tracking/routes.js";
 import { publicAccountRequestRouter, accountRequestRouter } from "./modules/account-requests/routes.js";
 import { permissionsRouter } from "./modules/permissions/routes.js";
+import { staffRouter } from "./modules/staff/routes.js";
 import { analyticsRouter } from "./modules/analytics/routes.js";
 
 export function createApp() {
@@ -41,6 +42,7 @@ export function createApp() {
   app.use("/api/notifications", notificationRouter);
   app.use("/api/account-requests", accountRequestRouter); // staff GET/status (public POST mounted above)
   app.use("/api/permissions", permissionsRouter);
+  app.use("/api/staff", staffRouter);
   app.use("/api/analytics", analyticsRouter);
 
   // 404 for unknown API routes.

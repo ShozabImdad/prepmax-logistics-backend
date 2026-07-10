@@ -47,6 +47,132 @@ accountsRouter.post(
   }),
 );
 
+// ── Branch detail (super-admin: stats + recent orders + staff + customers) ──
+accountsRouter.get(
+  "/branches/:publicId",
+  requireSuperAdmin,
+  asyncHandler(async (req, res) => {
+    const pid = String(req.params.publicId ?? "");
+    const data = await withSuperAdminAllBranches(async (sql) => {
+      const b = await sql.query(
+        `SELECT id, public_id, name, city, is_active, volumetric_divisor, created_at
+           FROM branches WHERE public_id = $1`,
+        [pid],
+      );
+      if (!b.rows[0]) return null;
+      const branch = b.rows[0];
+      const bid = branch.id;
+
+      const stats = await sql.query(
+        `SELECT
+           (SELECT COUNT(*) FROM orders WHERE branch_id = $1)                                   AS order_count,
+           (SELECT COUNT(*) FROM orders WHERE branch_id = $1 AND order_status = 'delivered')     AS delivered_count,
+           (SELECT COUNT(*) FROM orders WHERE branch_id = $1
+              AND order_status NOT IN ('delivered','cancelled'))                                 AS active_count,
+           (SELECT COALESCE(SUM(price),0) FROM orders WHERE branch_id = $1)                      AS revenue,
+           (SELECT COUNT(*) FROM customers WHERE branch_id = $1)                                 AS customer_count,
+           (SELECT COUNT(*) FROM users WHERE branch_id = $1)                                     AS staff_count`,
+        [bid],
+      );
+
+      const recentOrders = await sql.query(
+        `SELECT public_id, tracking_code, order_status, receiver_city, receiver_country, price, created_at
+           FROM orders WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 10`,
+        [bid],
+      );
+      const staff = await sql.query(
+        `SELECT public_id, full_name, email, role, is_active
+           FROM users WHERE branch_id = $1 ORDER BY full_name`,
+        [bid],
+      );
+      const customers = await sql.query(
+        `SELECT public_id, full_name, email, is_active
+           FROM customers WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 25`,
+        [bid],
+      );
+      return { branch, stats: stats.rows[0], recentOrders: recentOrders.rows, staff: staff.rows, customers: customers.rows };
+    });
+    if (!data) return res.status(404).json({ error: "Branch not found" });
+    const s = data.stats;
+    return res.json({
+      branch: {
+        publicId: data.branch.public_id, name: data.branch.name, city: data.branch.city,
+        isActive: data.branch.is_active, volumetricDivisor: data.branch.volumetric_divisor,
+        createdAt: data.branch.created_at,
+      },
+      stats: {
+        orders: Number(s.order_count), delivered: Number(s.delivered_count), active: Number(s.active_count),
+        revenue: Number(s.revenue), customers: Number(s.customer_count), staff: Number(s.staff_count),
+      },
+      recentOrders: data.recentOrders.map((o) => ({
+        publicId: o.public_id, trackingCode: o.tracking_code, orderStatus: o.order_status,
+        receiverCity: o.receiver_city, receiverCountry: o.receiver_country,
+        price: o.price != null ? Number(o.price) : null, createdAt: o.created_at,
+      })),
+      staff: data.staff.map((u) => ({
+        publicId: u.public_id, fullName: u.full_name, email: u.email, role: u.role, isActive: u.is_active,
+      })),
+      customers: data.customers.map((c) => ({
+        publicId: c.public_id, fullName: c.full_name, email: c.email, isActive: c.is_active,
+      })),
+    });
+  }),
+);
+
+// ── Edit branch settings (super-admin only) ─────────────────────────────────
+const branchEdit = z.object({
+  name: z.string().min(1).optional(),
+  city: z.string().min(1).optional(),
+  isActive: z.boolean().optional(),
+  volumetricDivisor: z.number().int().positive().optional(),
+});
+accountsRouter.patch(
+  "/branches/:publicId",
+  requireSuperAdmin,
+  asyncHandler(async (req, res) => {
+    const parsed = branchEdit.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid branch edit" });
+    const pid = String(req.params.publicId ?? "");
+    const updated = await withSuperAdminAllBranches(async (sql) => {
+      const set: string[] = []; const vals: unknown[] = [];
+      const push = (col: string, v: unknown) => { vals.push(v); set.push(`${col} = $${vals.length}`); };
+      if (parsed.data.name !== undefined) push("name", parsed.data.name);
+      if (parsed.data.city !== undefined) push("city", parsed.data.city);
+      if (parsed.data.isActive !== undefined) push("is_active", parsed.data.isActive);
+      if (parsed.data.volumetricDivisor !== undefined) push("volumetric_divisor", parsed.data.volumetricDivisor);
+      if (set.length === 0) return 1;
+      vals.push(pid);
+      const r = await sql.query(`UPDATE branches SET ${set.join(", ")} WHERE public_id = $${vals.length}`, vals);
+      return r.rowCount ?? 0;
+    });
+    if (updated === 0) return res.status(404).json({ error: "Branch not found" });
+    return res.json({ ok: true });
+  }),
+);
+
+// ── Delete a branch (super-admin, full cascade) ─────────────────────────────
+// branches are ON DELETE RESTRICT from orders/customers/users, so we tear
+// those down in FK order first. Orders cascade to boxes/items/legs/tracking.
+accountsRouter.delete(
+  "/branches/:publicId",
+  requireSuperAdmin,
+  asyncHandler(async (req, res) => {
+    const pid = String(req.params.publicId ?? "");
+    const result = await withSuperAdminAllBranches(async (sql) => {
+      const b = await sql.query<{ id: string }>("SELECT id FROM branches WHERE public_id = $1", [pid]);
+      if (!b.rows[0]) return null;
+      const bid = b.rows[0].id;
+      const o = await sql.query("DELETE FROM orders WHERE branch_id = $1", [bid]);
+      const c = await sql.query("DELETE FROM customers WHERE branch_id = $1", [bid]);
+      const u = await sql.query("DELETE FROM users WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM branches WHERE id = $1", [bid]); // branch-scoped roles cascade
+      return { orders: o.rowCount ?? 0, customers: c.rowCount ?? 0, staff: u.rowCount ?? 0 };
+    });
+    if (!result) return res.status(404).json({ error: "Branch not found" });
+    return res.json({ ok: true, deleted: result });
+  }),
+);
+
 // ── Create a branch-manager account (super-admin only) ──────────────────────
 const managerInput = z.object({
   email: z.string().email(),
@@ -212,6 +338,102 @@ accountsRouter.get(
         companyName: c.company_name, ntn: c.ntn, address: c.address, isActive: c.is_active, createdAt: c.created_at,
       })),
     });
+  }),
+);
+
+// ── Customer detail (profile + their orders) ────────────────────────────────
+accountsRouter.get(
+  "/customers/:publicId",
+  requireStaff,
+  requirePermission("customers.view"),
+  asyncHandler(async (req, res) => {
+    const pid = String(req.params.publicId ?? "");
+    const data = await req.db!(async (sql) => {
+      const c = await sql.query(
+        `SELECT id, public_id, full_name, email, phone, company_name, ntn, address, is_active, created_at
+           FROM customers WHERE public_id = $1`,
+        [pid],
+      );
+      if (!c.rows[0]) return null;
+      const cust = c.rows[0];
+      const orders = await sql.query(
+        `SELECT public_id, tracking_code, order_status, current_status, receiver_city, receiver_country, price, created_at
+           FROM orders WHERE customer_id = $1 ORDER BY created_at DESC LIMIT 100`,
+        [cust.id],
+      );
+      return { cust, orders: orders.rows };
+    });
+    if (!data) return res.status(404).json({ error: "Customer not found" });
+    const c = data.cust;
+    return res.json({
+      customer: {
+        publicId: c.public_id, fullName: c.full_name, email: c.email, phone: c.phone,
+        companyName: c.company_name, ntn: c.ntn, address: c.address, isActive: c.is_active, createdAt: c.created_at,
+      },
+      orders: data.orders.map((o) => ({
+        publicId: o.public_id, trackingCode: o.tracking_code, orderStatus: o.order_status,
+        currentStatus: o.current_status, receiverCity: o.receiver_city, receiverCountry: o.receiver_country,
+        price: o.price != null ? Number(o.price) : null, createdAt: o.created_at,
+      })),
+    });
+  }),
+);
+
+// ── Edit a customer ──────────────────────────────────────────────────────────
+const customerEdit = z.object({
+  fullName: z.string().min(1).optional(),
+  phone: z.string().optional(),
+  companyName: z.string().optional(),
+  ntn: z.string().optional(),
+  address: z.string().optional(),
+  isActive: z.boolean().optional(),
+});
+accountsRouter.patch(
+  "/customers/:publicId",
+  requireStaff,
+  requirePermission("customers.edit"),
+  asyncHandler(async (req, res) => {
+    const parsed = customerEdit.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Invalid customer edit" });
+    const pid = String(req.params.publicId ?? "");
+    const d = parsed.data;
+    const set: string[] = []; const vals: unknown[] = [];
+    const push = (col: string, v: unknown) => { vals.push(v); set.push(`${col} = $${vals.length}`); };
+    if (d.fullName !== undefined) push("full_name", d.fullName);
+    if (d.phone !== undefined) push("phone", d.phone || null);
+    if (d.companyName !== undefined) push("company_name", d.companyName || null);
+    if (d.ntn !== undefined) push("ntn", d.ntn || null);
+    if (d.address !== undefined) push("address", d.address || null);
+    if (d.isActive !== undefined) push("is_active", d.isActive);
+    if (set.length === 0) return res.json({ ok: true });
+    const updated = await req.db!(async (sql) => {
+      vals.push(pid);
+      const r = await sql.query(`UPDATE customers SET ${set.join(", ")} WHERE public_id = $${vals.length}`, vals);
+      return r.rowCount ?? 0;
+    });
+    if (updated === 0) return res.status(404).json({ error: "Customer not found" });
+    return res.json({ ok: true });
+  }),
+);
+
+// ── Delete a customer (cascade: their orders too, per client decision) ──────
+accountsRouter.delete(
+  "/customers/:publicId",
+  requireStaff,
+  requirePermission("customers.delete"),
+  asyncHandler(async (req, res) => {
+    const pid = String(req.params.publicId ?? "");
+    const result = await req.db!(async (sql) => {
+      const c = await sql.query<{ id: string }>("SELECT id FROM customers WHERE public_id = $1", [pid]);
+      if (!c.rows[0]) return { found: false, orders: 0 };
+      const custId = c.rows[0].id;
+      // Cascade: delete the customer's orders (boxes/items/legs/events cascade via FK).
+      const del = await sql.query("DELETE FROM orders WHERE customer_id = $1", [custId]);
+      await sql.query("DELETE FROM customers WHERE id = $1", [custId]);
+      return { found: true, orders: del.rowCount ?? 0 };
+    });
+    if (!result.found) return res.status(404).json({ error: "Customer not found" });
+    return res.json({ ok: true, deletedOrders: result.orders });
   }),
 );
 

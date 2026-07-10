@@ -101,3 +101,48 @@ permissionsRouter.post(
     return res.json({ ok: true });
   }),
 );
+
+// ── Create a custom role (global) ───────────────────────────────────────────
+const createRole = z.object({ name: z.string().min(1).max(60) });
+permissionsRouter.post(
+  "/roles",
+  requireSuperAdmin,
+  asyncHandler(async (req, res) => {
+    const parsed = createRole.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Role name is required" });
+    try {
+      const role = await withSuperAdminAllBranches(async (sql) => {
+        const r = await sql.query<{ id: string; name: string }>(
+          "INSERT INTO roles (branch_id, name, is_system) VALUES (NULL, $1, false) RETURNING id, name",
+          [parsed.data.name.trim()],
+        );
+        return r.rows[0]!;
+      });
+      return res.status(201).json({ role: { id: role.id, name: role.name, isGlobal: true, isSystem: false, permissions: [] } });
+    } catch (err) {
+      if (typeof err === "object" && err && (err as { code?: string }).code === "23505") {
+        return res.status(409).json({ error: "A role with that name already exists" });
+      }
+      throw err;
+    }
+  }),
+);
+
+// ── Delete a role (not system roles; unassigns from users automatically) ────
+permissionsRouter.delete(
+  "/roles/:id",
+  requireSuperAdmin,
+  asyncHandler(async (req, res) => {
+    const roleId = String(req.params.id ?? "");
+    const result = await withSuperAdminAllBranches(async (sql) => {
+      const r = await sql.query<{ is_system: boolean }>("SELECT is_system FROM roles WHERE id = $1", [roleId]);
+      if (!r.rows[0]) return "not_found";
+      if (r.rows[0].is_system) return "system";
+      await sql.query("DELETE FROM roles WHERE id = $1", [roleId]); // role_permissions + user_roles cascade
+      return "ok";
+    });
+    if (result === "not_found") return res.status(404).json({ error: "Role not found" });
+    if (result === "system") return res.status(409).json({ error: "System roles cannot be deleted" });
+    return res.json({ ok: true });
+  }),
+);
