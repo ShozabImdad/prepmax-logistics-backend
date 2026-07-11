@@ -41,6 +41,22 @@ interface Session {
   csrfToken: string;
 }
 
+/**
+ * Build a valid ISO-ish local timestamp from APX's separate date + time fields.
+ * `statusTime` can be "19:52", "19:52:33", or empty. Empty → midnight so the
+ * result stays a valid date (parseable, sortable) instead of "2026-07-10T:00".
+ */
+function buildApxTimestamp(statusDate: string, statusTime: string): string {
+  const date = (statusDate ?? "").trim();
+  const time = (statusTime ?? "").trim();
+  if (!date) return date; // nothing usable; leave as-is for the sync layer
+  if (!time) return `${date}T00:00:00`;
+  // Ensure HH:MM:SS (append :00 seconds only when just HH:MM was given).
+  const parts = time.split(":");
+  const withSeconds = parts.length >= 3 ? time : `${time}:00`;
+  return `${date}T${withSeconds}`;
+}
+
 async function getSession(): Promise<Session> {
   const res = await fetch(`${BASE}/`, {
     headers: { "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
@@ -137,7 +153,12 @@ export const apxAdapter: CarrierAdapter = {
         return true;
       })
       .map((e) => ({
-        timestamp: `${e.statusDate}T${e.statusTime}:00`, // no timezone given - treat as Pakistan local time
+        // No timezone given - treat as Pakistan local time. Some milestone
+        // events (e.g. SHIPMENT DEPARTED / ARRIVED) carry a date but an EMPTY
+        // statusTime; building `${date}T${time}:00` then yields an invalid
+        // "2026-07-10T:00". Fall back to midnight so the timestamp stays valid
+        // (and sorts by date) instead of becoming NULL/"Invalid Date".
+        timestamp: buildApxTimestamp(e.statusDate, e.statusTime),
         location: e.location?.trim() || null,
         description: e.status.replace(/`/g, "").trim(), // sample data had a stray backtick
       }))

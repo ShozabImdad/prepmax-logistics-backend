@@ -199,6 +199,47 @@ export async function attachLegs(run: Run, orderPublicId: string, legs: LegInput
   });
 }
 
+/**
+ * Edit an existing carrier leg (identified by order publicId + leg sequence).
+ * Staff can correct the carrier and/or tracking number they entered. When the
+ * carrier or tracking number changes, that leg's previously-fetched tracking
+ * events are stale (they belonged to a different shipment), so we clear them —
+ * the next sync repopulates from the corrected number.
+ */
+export async function editLeg(
+  run: Run,
+  orderPublicId: string,
+  sequence: number,
+  patch: { carrier?: string; trackingNumber?: string },
+): Promise<{ orderId: string; branchId: string; cleared: boolean }> {
+  return run(async (sql) => {
+    const order = await findOrderIdByPublicId(sql, orderPublicId);
+    if (!order) throw new OrderError(404, "Order not found");
+
+    const legRes = await sql.query<{ id: string; carrier: string; carrier_tracking_number: string }>(
+      "SELECT id, carrier, carrier_tracking_number FROM shipment_legs WHERE order_id = $1 AND sequence = $2",
+      [order.id, sequence],
+    );
+    const leg = legRes.rows[0];
+    if (!leg) throw new OrderError(404, "Carrier leg not found");
+
+    const newCarrier = patch.carrier ?? leg.carrier;
+    const newTracking = patch.trackingNumber ?? leg.carrier_tracking_number;
+    if (!newTracking.trim()) throw new OrderError(400, "Tracking number cannot be empty");
+
+    const changed = newCarrier !== leg.carrier || newTracking !== leg.carrier_tracking_number;
+    if (!changed) return { orderId: order.id, branchId: order.branch_id, cleared: false };
+
+    await sql.query(
+      "UPDATE shipment_legs SET carrier = $1, carrier_tracking_number = $2 WHERE id = $3",
+      [newCarrier, newTracking.trim(), leg.id],
+    );
+    // Old events are for the previous number → clear them; next sync refills.
+    await sql.query("DELETE FROM tracking_events WHERE shipment_leg_id = $1", [leg.id]);
+    return { orderId: order.id, branchId: order.branch_id, cleared: true };
+  });
+}
+
 // ── Read views ──────────────────────────────────────────────────────────────
 
 export interface OrderListRow {

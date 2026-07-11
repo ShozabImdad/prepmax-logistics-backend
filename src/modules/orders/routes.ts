@@ -21,6 +21,7 @@ import {
   cancelOrder,
   deleteOrder,
   attachLegs,
+  editLeg,
   listOrders,
   getOrderDetail,
   resolveOrderId,
@@ -163,6 +164,29 @@ orderRouter.post(
         emitEvent({ kind: "order_activated", orderId: result.orderId, branchId: result.branchId });
       }
       return res.json({ ok: true, orderStatus: result.orderStatus, legCount: result.legCount });
+    } catch (err) {
+      return handleOrderError(err, res);
+    }
+  }),
+);
+
+// ── STAFF: edit an existing carrier leg (correct carrier / tracking number) ──
+const editLegBody = z.object({
+  carrier: z.string().min(1).optional(),
+  trackingNumber: z.string().min(1).optional(),
+});
+orderRouter.patch(
+  "/:publicId/legs/:sequence",
+  requireStaff,
+  requirePermission("tracking.manage"),
+  asyncHandler(async (req, res) => {
+    const parsed = editLegBody.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "carrier and/or trackingNumber required" });
+    const seq = Number(param(req.params.sequence));
+    if (!Number.isInteger(seq) || seq < 1) return res.status(400).json({ error: "Invalid leg sequence" });
+    try {
+      const result = await editLeg(req.db!, param(req.params.publicId), seq, parsed.data);
+      return res.json({ ok: true, eventsCleared: result.cleared });
     } catch (err) {
       return handleOrderError(err, res);
     }
