@@ -7,7 +7,10 @@ import { chromium, type Browser } from "patchright";
 let browserPromise: Promise<Browser> | null = null;
 function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
-    browserPromise = chromium.launch({ headless: true });
+    // Use the system Chrome (channel: "chrome") like the tracking adapters, so
+    // we reuse the installed browser instead of Patchright's separate bundled
+    // Chromium download (which isn't installed on the server).
+    browserPromise = chromium.launch({ headless: true, channel: "chrome" });
   }
   return browserPromise;
 }
