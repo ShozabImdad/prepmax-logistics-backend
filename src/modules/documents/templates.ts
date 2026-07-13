@@ -1,22 +1,50 @@
 // HTML templates for the air waybill and receipt, rendered to A4 PDF.
 import type { DocData, DocContact } from "./data.js";
 import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 // ============================================================================
 // LOGO PRE-LOADING (Converts image to safe Base64 string for Chromium)
 // ============================================================================
-let logoDataUri = "";
-try {
-  const logoPath = "F:\\Internship\\PrepMax_logistics\\prepmax-logistics-frontend\\public\\brand\\logo.png";
-  if (fs.existsSync(logoPath)) {
-    const fileBuffer = fs.readFileSync(logoPath);
-    logoDataUri = `data:image/png;base64,${fileBuffer.toString("base64")}`;
-  } else {
-    console.warn("Logo file not found at path, falling back to text typography.");
-  }
-} catch (error) {
-  console.error("Failed to load logo image:", error);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Candidate locations for the logo, checked in order. process.cwd()-based
+// paths cover "started from project root" (most deploys, e.g. `node
+// dist/index.js` run from the repo root). __dirname-based paths cover cases
+// where cwd isn't the project root (e.g. some PM2/serverless setups) by
+// walking up from wherever this compiled file actually sits.
+function resolveAssetPath(filename: string): string | null {
+  const candidates = [
+    path.join(process.cwd(), "src", "public", filename),
+    path.join(process.cwd(), "public", filename),
+    path.join(__dirname, "..", "public", filename),
+    path.join(__dirname, "..", "..", "src", "public", filename),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) ?? null;
 }
+
+function loadLogoDataUri(): string {
+  const primary = resolveAssetPath("logo.png");
+  const fallback = resolveAssetPath("logo-alt.png");
+  const chosen = primary ?? fallback;
+
+  if (!chosen) {
+    console.warn("Logo file not found (checked logo.png and logo-alt.png), falling back to text typography.");
+    return "";
+  }
+
+  try {
+    const fileBuffer = fs.readFileSync(chosen);
+    return `data:image/png;base64,${fileBuffer.toString("base64")}`;
+  } catch (error) {
+    console.error("Failed to load logo image:", error);
+    return "";
+  }
+}
+
+const logoDataUri = loadLogoDataUri();
 
 // ============================================================================
 // HELPERS
@@ -219,6 +247,7 @@ export function awbHtml(d: DocData, barcode: string): string {
 // TEMPLATE 2: SHIPPING RECEIPT
 // ============================================================================
 export function receiptHtml(d: DocData, barcode: string): string {
+  
   const pkgRows = d.boxes.map((b, i) => `<tr>
       <td class="num">${i + 1}</td>
       <td>${b.items.length ? b.items.map((it) => `${esc(it.description)} ×${it.quantity}`).join(", ") : "<span class='muted'>—</span>"}</td>
