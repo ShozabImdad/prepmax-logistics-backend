@@ -1,15 +1,26 @@
 // HTML templates for the air waybill and receipt, rendered to A4 PDF.
-//
-// The AWB follows the STANDARD air-waybill box layout (researched, not
-// invented): header + AWB number (top-right per convention), Shipper box,
-// Consignee box, origin/destination, a cargo table (pieces / gross weight /
-// chargeable weight / nature & quantity of goods), declared value, handling
-// information, and a signature / date / place-of-execution section. Fields we
-// don't capture (IATA airport codes, flight routing, freight rates) are
-// omitted rather than faked — we use the city/country and weights we do have.
-
 import type { DocData, DocContact } from "./data.js";
+import fs from "fs";
 
+// ============================================================================
+// LOGO PRE-LOADING (Converts image to safe Base64 string for Chromium)
+// ============================================================================
+let logoDataUri = "";
+try {
+  const logoPath = "F:\\Internship\\PrepMax_logistics\\prepmax-logistics-frontend\\public\\brand\\logo.png";
+  if (fs.existsSync(logoPath)) {
+    const fileBuffer = fs.readFileSync(logoPath);
+    logoDataUri = `data:image/png;base64,${fileBuffer.toString("base64")}`;
+  } else {
+    console.warn("Logo file not found at path, falling back to text typography.");
+  }
+} catch (error) {
+  console.error("Failed to load logo image:", error);
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
 function esc(s: unknown): string {
   return String(s ?? "").replace(/[&<>"']/g, (m) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]!),
@@ -34,34 +45,6 @@ function fmtDate(iso: string): string {
   return isNaN(d.getTime()) ? esc(iso) : d.toISOString().slice(0, 10);
 }
 
-const SHARED_CSS = `
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body { font-family: "Segoe UI", Arial, sans-serif; color: #111; font-size: 11px; }
-  .page { width: 210mm; min-height: 297mm; padding: 12mm 12mm 14mm; margin: 0 auto; }
-  .muted { color: #888; }
-  h1, h2, h3 { margin: 0; }
-  table { border-collapse: collapse; width: 100%; }
-  .brand { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; color: #0f2f6b; }
-  .brand small { display:block; font-size: 10px; font-weight: 600; letter-spacing: 2px; color:#7a8aa5; }
-  .doc-title { font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
-  .box { border: 1px solid #333; padding: 6px 8px; }
-  .box .lbl { font-size: 8px; text-transform: uppercase; letter-spacing: 0.5px; color:#555; font-weight:700; margin-bottom:3px; }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
-  .grid2 > .box { border-right: 0; }
-  .grid2 > .box:last-child { border-right: 1px solid #333; }
-  .cargo th, .cargo td { border: 1px solid #333; padding: 4px 6px; text-align: left; vertical-align: top; }
-  .cargo th { background: #f0f3f8; font-size: 8px; text-transform: uppercase; letter-spacing: 0.4px; }
-  .num { text-align: right; font-variant-numeric: tabular-nums; }
-  .totrow td { font-weight: 700; background:#f7f9fc; }
-  .barcode img { height: 46px; }
-  .flags span { display:inline-block; border:1px solid #b45309; color:#b45309; border-radius:3px; padding:1px 6px; font-size:9px; margin-right:4px; text-transform:uppercase; }
-  .sign { display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 18px; }
-  .sign .line { border-top: 1px solid #333; padding-top: 3px; font-size: 9px; color:#555; margin-top:34px; }
-  .foot { margin-top: 14px; font-size: 8px; color:#888; border-top: 1px solid #ddd; padding-top: 6px; }
-`;
-
-/** Full address block for the proforma invoice (line1/line2/city/state/country/zip). */
 function addressLines(c: DocContact): string {
   const rows: string[] = [];
   if (c.address) rows.push(`<div><b>ADD:</b> ${esc(c.address)}</div>`);
@@ -79,8 +62,41 @@ function addressLines(c: DocContact): string {
   return rows.join("");
 }
 
+// ============================================================================
+// CORE CSS STYLE STACK
+// ============================================================================
+const SHARED_CSS = `
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: "Segoe UI", Arial, sans-serif; color: #111; font-size: 11px; }
+  .page { width: 210mm; min-height: 297mm; padding: 12mm 12mm 14mm; margin: 0 auto; }
+  .muted { color: #888; }
+  h1, h2, h3 { margin: 0; }
+  table { border-collapse: collapse; width: 100%; }
+  .brand img { display: block; height: 42px; width: auto; object-fit: contain; }
+  .brand-text { font-size: 20px; font-weight: 800; letter-spacing: -0.5px; color: #0f2f6b; }
+  .brand-text small { display:block; font-size: 10px; font-weight: 600; letter-spacing: 2px; color:#7a8aa5; }
+  .doc-title { font-size: 15px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+  .box { border: 1px solid #333; padding: 6px 8px; }
+  .box .lbl { font-size: 8px; text-transform: uppercase; letter-spacing: 0.5px; color:#555; font-weight:700; margin-bottom:3px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  .grid2 > .box { border-right: 0; }
+  .grid2 > .box:last-child { border-right: 1px solid #333; }
+  .cargo th, .cargo td { border: 1px solid #333; padding: 4px 6px; text-align: left; vertical-align: top; }
+  .cargo th { background: #f0f3f8; font-size: 8px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .totrow td { font-weight: 700; background:#f7f9fc; }
+  .barcode img { height: 46px; }
+  .flags span { display:inline-block; border:1px solid #b45309; color:#b45309; border-radius:3px; padding:1px 6px; font-size:9px; margin-right:4px; text-transform:uppercase; }
+  .sign { display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 18px; }
+  .sign .line { border-top: 1px solid #333; padding-top: 3px; font-size: 9px; color:#555; margin-top:34px; }
+  .foot { margin-top: 14px; font-size: 8px; color:#888; border-top: 1px solid #ddd; padding-top: 6px; }
+`;
+
+// ============================================================================
+// TEMPLATE 1: AIR WAYBILL (AWB)
+// ============================================================================
 export function awbHtml(d: DocData, barcode: string): string {
-  // Goods table rows: description, quantity, declared value ($).
   const itemRows = d.boxes
     .flatMap((b) => b.items.map((it) => ({ description: it.description, quantity: it.quantity, value: (it.unitValue ?? 0) * (it.quantity ?? 1) })))
     .filter((r) => r.description);
@@ -114,11 +130,12 @@ export function awbHtml(d: DocData, barcode: string): string {
     .sig2 .cap { text-align:center; font-weight:700; font-size:9px; margin-top:3px; }
   </style></head><body>
   <div class="page">
-    <!-- Prep Max header -->
     <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
       <div>
-        <div class="brand">PREP MAX<small>LOGISTICS</small></div>
-        <div class="muted" style="margin-top:2px;">${esc(d.branchName)} · ${esc(d.branchCity)}</div>
+        <div class="brand">
+          ${logoDataUri ? `<img src="${logoDataUri}" alt="Prep Max Logistics">` : `<div class="brand-text">PREP MAX<small>LOGISTICS</small></div>`}
+        </div>
+        <div class="muted" style="margin-top:4px;">${esc(d.branchName)} · ${esc(d.branchCity)}</div>
       </div>
       <div style="text-align:right;">
         <div>Tracking: <strong>${esc(d.trackingCode)}</strong></div>
@@ -128,8 +145,6 @@ export function awbHtml(d: DocData, barcode: string): string {
 
     <div class="inv">
       <div class="title">PROFORMA INVOICE &amp; UNDERTAKING</div>
-
-      <!-- Shipper + ship meta -->
       <div class="r bb">
         <div class="br" style="flex:8;">
           <div class="lbl2">Shipper</div>
@@ -143,7 +158,6 @@ export function awbHtml(d: DocData, barcode: string): string {
         </div>
       </div>
 
-      <!-- Consignee + shipment meta -->
       <div class="r bb">
         <div class="br" style="flex:8;">
           <div class="lbl2">Consignee</div>
@@ -160,7 +174,6 @@ export function awbHtml(d: DocData, barcode: string): string {
         </div>
       </div>
 
-      <!-- Goods table -->
       <table class="gtable" style="border:0;">
         <thead><tr>
           <th style="width:64%">Goods Description</th>
@@ -177,7 +190,6 @@ export function awbHtml(d: DocData, barcode: string): string {
         </tbody>
       </table>
 
-      <!-- Undertaking -->
       <div class="bb" style="border-top:1px solid #000;">
         <div style="text-align:center; font-weight:800; text-decoration:underline; padding:5px;">TO WHOM IT MAY CONCERN</div>
       </div>
@@ -185,7 +197,7 @@ export function awbHtml(d: DocData, barcode: string): string {
         I, <b>${esc(d.sender.name ?? "the shipper")}</b>, hereby certify that this shipment
         having CNIC: <b>${esc(cnic)}</b>, Tracking No: <b>${esc(d.trackingCode)}</b>, dated:
         <b>${shipDate}</b> is for personal use only. Contents are dry goods. No drugs, narcotics,
-        contraband items or any IATA restricted items are included. If any restricted items are
+         contraband items or any IATA restricted items are included. If any restricted items are
         discovered from this shipment, I shall be held responsible. I/We have read and agree that
         the Terms and Conditions of Carriage as stated on the Shipment Airway Bill apply to this
         shipment.
@@ -203,6 +215,9 @@ export function awbHtml(d: DocData, barcode: string): string {
   </body></html>`;
 }
 
+// ============================================================================
+// TEMPLATE 2: SHIPPING RECEIPT
+// ============================================================================
 export function receiptHtml(d: DocData, barcode: string): string {
   const pkgRows = d.boxes.map((b, i) => `<tr>
       <td class="num">${i + 1}</td>
@@ -221,8 +236,10 @@ export function receiptHtml(d: DocData, barcode: string): string {
   <div class="page">
     <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; border-bottom:2px solid #0f2f6b; padding-bottom:10px;">
       <div>
-        <div class="brand">PREP MAX<small>LOGISTICS</small></div>
-        <div class="muted" style="margin-top:2px;">${esc(d.branchName)} · ${esc(d.branchCity)}</div>
+        <div class="brand">
+          ${logoDataUri ? `<img src="${logoDataUri}" alt="Prep Max Logistics">` : `<div class="brand-text">PREP MAX<small>LOGISTICS</small></div>`}
+        </div>
+        <div class="muted" style="margin-top:4px;">${esc(d.branchName)} · ${esc(d.branchCity)}</div>
       </div>
       <div style="text-align:right;">
         <div class="doc-title">Shipping Receipt</div>
