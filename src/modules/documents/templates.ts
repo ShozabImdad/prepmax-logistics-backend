@@ -318,3 +318,126 @@ export function receiptHtml(d: DocData, barcode: string): string {
   </div>
   </body></html>`;
 }
+
+// ============================================================================
+// TEMPLATE 3: SHIPPING BILL (courier label / customs-style bill)
+// ============================================================================
+export function shippingBillHtml(d: DocData, barcode: string): string {
+ const isDox = d.contentsNature === "documents";
+  const doxTag = isDox ? "DOX" : "NON-DOX";
+  const carrierLabel = d.carrier ? d.carrier.toUpperCase() : null;
+  const routeLine = [
+    d.destinationCountry ? d.destinationCountry.toUpperCase() : null,
+    d.serviceLevel,
+    d.duties,
+    carrierLabel ? `VIA ${carrierLabel}` : null,
+  ].filter(Boolean).join(" ") || "—";
+  const billDate = fmtDate(d.createdAt);
+ const origin = [d.branchCity, d.originCountry || d.sender.country].filter(Boolean).join("-").toUpperCase() || "—";
+
+  const fromAddr = [d.sender.address, [d.sender.city, d.sender.postcode].filter(Boolean).join(" ")]
+    .filter(Boolean).map(esc).join(" ");
+
+  const toLines = [
+    d.receiver.address,
+    d.receiver.address2,
+    [d.receiver.city, d.receiver.postcode].filter(Boolean).join(" "),
+    d.receiver.country,
+  ].filter(Boolean).map(esc);
+
+  const pieces = `${String(d.pieceCount).padStart(1, "0")} / ${String(d.pieceCount).padStart(1, "0")}`;
+
+    return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
+    .bill { border: 2px solid #000; }
+    .bill .top { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:2px solid #000; }
+    .bill .route { font-size:11px; font-weight:600; }
+    .bill .route-date { font-size:11px; margin-top:2px; }
+    .bill .doxtag { background:#333; color:#fff; font-weight:800; letter-spacing:1px; padding:6px 14px; font-size:13px; }
+    .bill .courier { font-size:22px; font-weight:800; letter-spacing:0.5px; }
+    .bill .row { display:flex; border-bottom:2px solid #000; }
+    .bill .row > .cell { padding:10px 12px; }
+    .bill .row > .cell.br { border-right:2px solid #000; }
+    .bill .lbl3 { font-weight:700; font-size:11px; }
+    .bill .val3 { font-size:13px; font-weight:700; margin-top:2px; }
+    .bill .contact { font-weight:700; margin-top:4px; }
+    .bill .banner { background:#c9c9c9; text-align:center; font-weight:800; font-size:18px; padding:8px; letter-spacing:1px; }
+    .bill .meta { display:flex; border-bottom:2px solid #000; }
+    .bill .meta > .cell { flex:1; padding:10px 12px; border-right:1px solid #000; }
+    .bill .meta > .cell:last-child { border-right:0; }
+    .bill .meta .k { font-weight:700; font-size:11px; }
+    .bill .meta .v { font-size:13px; margin-top:2px; }
+    .bill .awb { padding:10px 12px; font-weight:800; font-size:14px; border-bottom:1px solid #000; }
+    .bill .barcodewrap { padding:10px 12px; display:flex; align-items:flex-end; justify-content:space-between; }
+    .bill .barcodewrap .barcode-img { height:64px; }
+    .bill .barcodewrap .logo-img { height:48px; width:auto; object-fit:contain; opacity:0.85; }
+  </style></head><body>
+  <div class="page">
+    <div class="bill">
+      <div class="top">
+        <div>
+          <div class="route">${esc(routeLine)}</div>
+          <div class="route-date">${esc(billDate)}</div>
+        </div>
+        <div style="text-align:right;">
+          <div class="doxtag">${doxTag}</div>
+          <div class="courier" style="margin-top:6px;">${esc(d.branchName || "LOGISTICS")}</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell br" style="flex:7;">
+          <div class="lbl3">From:</div>
+          <div class="val3">${esc(d.sender.name ?? "—")}</div>
+          <div>${fromAddr || "<span class='muted'>—</span>"}</div>
+        </div>
+        <div class="cell" style="flex:5;">
+          <div class="lbl3">Origin:</div>
+          <div class="val3">${esc(origin)}</div>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell br" style="flex:7;">
+          <div class="lbl3">To:</div>
+          <div class="val3">${esc(d.receiver.name ?? "—")}</div>
+          <div>${toLines.join("<br>") || "<span class='muted'>—</span>"}</div>
+        </div>
+        <div class="cell" style="flex:5;">
+          <div class="lbl3">Contact</div>
+          <div class="contact">${esc(d.receiver.name ?? "—")}</div>
+          ${d.receiver.phone ? `<div style="margin-top:6px;">${esc(d.receiver.phone)}</div>` : ""}
+        </div>
+      </div>
+
+      <div class="banner">${esc((d.receiver.country ?? "—").toUpperCase())}</div>
+
+      <div class="meta">
+        <div class="cell">
+          <div class="k">Contents</div>
+          <div class="v">${esc(d.contentsNature ?? "—")}</div>
+        </div>
+        <div class="cell">
+          <div class="k">Shipment Weight:</div>
+          <div class="v">${d.totalGrossKg.toFixed(2)}</div>
+        </div>
+        <div class="cell">
+          <div class="k">Piece</div>
+          <div class="v">${pieces}</div>
+        </div>
+      </div>
+      <div class="meta">
+        <div class="cell" style="flex:none; width:100%;">
+          <div class="k">Ref Code:</div>
+          <div class="v">${esc(d.trackingCode)}</div>
+        </div>
+      </div>
+
+      <div class="awb">Airway Bill - ${esc(d.awbNumber ?? "—")}</div>
+      <div class="barcodewrap">
+        <img class="barcode-img" src="${barcode}" alt="barcode">
+        ${logoDataUri ? `<img class="logo-img" src="${logoDataUri}" alt="Prep Max Logistics">` : ""}
+      </div>
+    </div>
+  </div>
+  </body></html>`;
+}

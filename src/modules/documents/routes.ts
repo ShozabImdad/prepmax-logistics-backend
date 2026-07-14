@@ -8,7 +8,7 @@ import { requireStaff, requirePermission, requireCustomer } from "../../middlewa
 import { isCustomer } from "../auth/types.js";
 import { loadDocData } from "./data.js";
 import { barcodeDataUri } from "./barcode.js";
-import { awbHtml, receiptHtml } from "./templates.js";
+import { awbHtml, receiptHtml,shippingBillHtml  } from "./templates.js";
 import { htmlToPdf } from "./pdf.js";
 
 function pubId(v: string | string[] | undefined): string {
@@ -49,7 +49,20 @@ documentRouter.get(
     return res.end(pdf);
   }),
 );
-
+documentRouter.get(
+  "/:publicId/shipping-bill.pdf",
+  requireStaff,
+  requirePermission("documents.print"),
+  asyncHandler(async (req, res) => {
+    const data = await loadDocData(req.db!, pubId(req.params.publicId));
+    if (!data) return res.status(404).json({ error: "Order not found" });
+    const barcode = await barcodeDataUri(data.awbNumber || data.trackingCode);
+    const pdf = await htmlToPdf(shippingBillHtml(data, barcode));
+    res.setHeader("content-type", "application/pdf");
+    res.setHeader("content-disposition", `inline; filename="ShippingBill-${data.trackingCode}.pdf"`);
+    return res.end(pdf);
+  }),
+);
 // ── CUSTOMER: their own receipt (plan §5: receipt download in portal) ───────
 portalDocumentRouter.get(
   "/:publicId/receipt.pdf",

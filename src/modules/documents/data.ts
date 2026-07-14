@@ -29,6 +29,10 @@ export interface DocData {
   sender: DocContact;
   receiver: DocContact;
   serviceType: string | null;
+  serviceLevel: string | null;
+  originCountry: string | null;
+  destinationCountry: string | null;
+  carrier: string | null;
   contentsNature: string | null;
   declaredValue: number | null;
   currency: string | null;
@@ -105,6 +109,14 @@ export async function loadDocData(run: Run, orderPublicId: string): Promise<DocD
         })),
     }));
 
+   const legRows = await sql.query(
+      `SELECT carrier FROM shipment_legs
+        WHERE order_id = $1 AND is_active = true
+        ORDER BY sequence LIMIT 1`,
+      [o.id],
+    );
+    const carrier = legRows.rows[0]?.carrier ?? null;
+
     const totalGrossKg = round3(boxes.reduce((s, b) => s + b.weightKg, 0));
     const totalChargeableKg = round3(boxes.reduce((s, b) => s + b.chargeableKg, 0));
 
@@ -116,7 +128,11 @@ export async function loadDocData(run: Run, orderPublicId: string): Promise<DocD
       createdAt: o.created_at,
       sender: contact(o, "sender"),
       receiver: contact(o, "receiver"),
-      serviceType: o.service_type,
+    serviceType: o.service_type,
+      serviceLevel: o.service_level,
+      originCountry: o.origin_country,
+      destinationCountry: o.destination_country,
+      carrier,
       contentsNature: o.contents_nature,
       declaredValue: o.declared_total != null ? Number(o.declared_total) : null,
       currency: o.declared_currency,
