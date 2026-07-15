@@ -15,6 +15,7 @@ import { publicAccountRequestRouter, accountRequestRouter } from "./modules/acco
 import { permissionsRouter } from "./modules/permissions/routes.js";
 import { staffRouter } from "./modules/staff/routes.js";
 import { analyticsRouter } from "./modules/analytics/routes.js";
+import { complaintRouter, portalComplaintRouter } from "./modules/complaints/routes.js";
 
 export function createApp() {
   const app = express();
@@ -44,6 +45,8 @@ export function createApp() {
   app.use("/api/permissions", permissionsRouter);
   app.use("/api/staff", staffRouter);
   app.use("/api/analytics", analyticsRouter);
+  app.use("/api/complaints", complaintRouter);
+  app.use("/api/portal/complaints", portalComplaintRouter);
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
