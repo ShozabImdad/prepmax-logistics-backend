@@ -24,6 +24,7 @@ const MANAGER_PERMISSIONS = [
   "tracking.view", "tracking.manage",
   "customers.view", "customers.create", "customers.edit",
   "documents.print", "reports.view",
+  "complaints.view", "complaints.manage",
 ];
 
 async function run(): Promise<void> {
