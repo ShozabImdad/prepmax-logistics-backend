@@ -1,10 +1,11 @@
 // Tracking sync — the bridge between the carrier adapters and the database.
 //
-// syncOrder(orderId): for one order, picks its ACTIVE shipment leg, calls the
-// matching adapter, writes any NEW normalized events into tracking_events, and
-// updates the cached current_status / current_status_text / last_synced_at on
-// the order. Idempotent: events are de-duplicated by a stable key so
-// re-polling never creates duplicates.
+// syncOrder(orderId): for one order, polls EVERY shipment leg (not just the
+// active one), calls each leg's matching adapter, writes any NEW normalized
+// events into tracking_events per leg, and updates the cached
+// current_status / current_status_text / last_synced_at on the order based on
+// the ACTIVE leg's result. Idempotent: events are de-duplicated by a stable
+// key so re-polling never creates duplicates.
 //
 // The poller runs outside HTTP requests, so it uses withSystemTx (a transaction
 // that sets the branch context to the order's own branch — RLS still applies,
@@ -21,23 +22,36 @@ import type { NormalizedTracking, TrackingEvent } from "./adapters/types.js";
 // Terminal statuses we stop polling.
 export const TERMINAL_STATUSES = new Set(["delivered"]);
 
-export interface SyncResult {
-  orderId: string;
-  carrier: string | null;
-  status: "no_active_leg" | "not_found" | "synced" | "error";
+export interface LegSyncResult {
+  legId: string;
+  carrier: string;
+  sequence: number;
+  isActive: boolean;
+  status: "not_found" | "synced" | "error";
   normalizedStatus?: string;
   newEvents?: number;
-  handoffCreated?: string | null; // carrier of an auto-created leg, if any
   error?: string;
 }
 
-interface ActiveLeg {
+export interface SyncResult {
+  orderId: string;
+  carrier: string | null; // active leg's carrier, kept for backward compatibility
+  status: "no_legs" | "synced" | "error";
+  normalizedStatus?: string; // active leg's status
+  newEvents?: number; // total across all legs
+  handoffCreated?: string | null; // carrier of an auto-created leg, if any
+  legs?: LegSyncResult[]; // per-leg breakdown
+  error?: string;
+}
+
+interface Leg {
   legId: string;
   orderId: string;
   branchId: string;
   carrier: string;
   trackingNumber: string;
   sequence: number;
+  isActive: boolean;
 }
 
 /**
@@ -70,25 +84,24 @@ function eventKey(e: TrackingEvent): string {
   return `${ts}|${e.location ?? ""}|${e.description}`;
 }
 
-async function getActiveLeg(sql: Sql, orderId: string): Promise<ActiveLeg | null> {
-  // Prefer the leg marked is_active; else the highest sequence.
+// CHANGED: was getActiveLeg (LIMIT 1, active-first). Now returns ALL legs for
+// the order, so every carrier gets polled — not just the currently-active one.
+async function getAllLegs(sql: Sql, orderId: string): Promise<Leg[]> {
   const { rows } = await sql.query(
-    `SELECT id, order_id, branch_id, carrier, carrier_tracking_number, sequence
+    `SELECT id, order_id, branch_id, carrier, carrier_tracking_number, sequence, is_active
        FROM shipment_legs
       WHERE order_id = $1
-      ORDER BY is_active DESC, sequence DESC
-      LIMIT 1`,
+      ORDER BY sequence ASC`,
     [orderId],
   );
-  const r = rows[0];
-  if (!r) return null;
-  return {
+  return rows.map((r) => ({
     legId: r.id, orderId: r.order_id, branchId: r.branch_id,
-    carrier: r.carrier, trackingNumber: r.carrier_tracking_number, sequence: r.sequence,
-  };
+    carrier: r.carrier, trackingNumber: r.carrier_tracking_number,
+    sequence: r.sequence, isActive: r.is_active,
+  }));
 }
 
-async function writeEvents(sql: Sql, leg: ActiveLeg, result: NormalizedTracking): Promise<number> {
+async function writeEvents(sql: Sql, leg: Leg, result: NormalizedTracking): Promise<number> {
   // Load existing event keys for this leg to avoid duplicates.
   const existing = await sql.query<{ event_time: Date | null; event_time_raw: string | null; location: string | null; description: string }>(
     `SELECT event_time, event_time_raw, location, description FROM tracking_events WHERE shipment_leg_id = $1`,
@@ -122,7 +135,7 @@ async function writeEvents(sql: Sql, leg: ActiveLeg, result: NormalizedTracking)
  * don't already have a leg for, create that next leg (sequence+1) and make it
  * active. Returns the created carrier or null.
  */
-async function maybeCreateHandoffLeg(sql: Sql, leg: ActiveLeg, result: NormalizedTracking): Promise<string | null> {
+async function maybeCreateHandoffLeg(sql: Sql, leg: Leg, result: NormalizedTracking): Promise<string | null> {
   const next = detectHandoff(result);
   if (!next) return null;
 
@@ -151,16 +164,14 @@ async function maybeCreateHandoffLeg(sql: Sql, leg: ActiveLeg, result: Normalize
 }
 
 /**
- * Sync a single order. Loads its active leg, calls the adapter, writes new
- * events, updates cached status, and (for APX) auto-creates a handoff leg.
+ * Sync a single order. Loads ALL legs, calls each leg's adapter, writes new
+ * events per leg, updates cached status from the ACTIVE leg's result, and
+ * (for APX) auto-creates a handoff leg.
  */
 export async function syncOrder(orderId: string): Promise<SyncResult> {
-  // 1. Read the active leg + branch (short tx).
-  let leg: ActiveLeg | null = null;
+  // 1. Read the branch id first (short tx), same as before.
   let branchId = "";
   try {
-    // We need the branch id first to set context. Read it with a super-admin
-    // all-branches lookup limited to this order.
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -180,73 +191,116 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
     return { orderId, carrier: null, status: "error", error: e instanceof Error ? e.message : String(e) };
   }
 
+  let activeCarrier: string | null = null;
+
   return withOrderBranchTx(branchId, async (sql): Promise<SyncResult> => {
-    leg = await getActiveLeg(sql, orderId);
-    if (!leg) return { orderId, carrier: null, status: "no_active_leg" };
+    const legs = await getAllLegs(sql, orderId);
+    if (legs.length === 0) return { orderId, carrier: null, status: "no_legs" };
 
-    const adapter = resolveAdapter(leg.carrier);
-    if (!adapter) {
-      return { orderId, carrier: leg.carrier, status: "error", error: `no adapter for "${leg.carrier}"` };
-    }
+    const legResults: LegSyncResult[] = [];
+    let totalNewEvents = 0;
+    let handoffCreated: string | null = null;
+    let activeResult: NormalizedTracking | null = null;
+    let activeLeg: Leg | null = null;
 
-    let result: NormalizedTracking | null;
-    try {
-      result = await adapter.track(leg.trackingNumber);
-    } catch (e) {
-      return { orderId, carrier: leg.carrier, status: "error", error: e instanceof Error ? e.message : String(e) };
-    }
+    // Poll every leg — not just the active one.
+    for (const leg of legs) {
+      if (leg.isActive) activeCarrier = leg.carrier;
 
-    if (result === null) {
-      // Not found yet (e.g. carrier hasn't scanned it). Update last_synced_at.
-      await sql.query("UPDATE orders SET last_synced_at = now() WHERE id = $1", [orderId]);
-      return { orderId, carrier: leg.carrier, status: "not_found" };
-    }
-
-    const newEvents = await writeEvents(sql, leg, result);
-    const handoffCreated = leg.carrier === "smartcargo-apx"
-      ? await maybeCreateHandoffLeg(sql, leg, result)
-      : null;
-
-    // Read the previous cached status so we only fire lifecycle events on a
-    // real transition (not on every poll while it stays delivered/exception).
-    const prev = await sql.query<{ current_status: string | null }>(
-      "SELECT current_status FROM orders WHERE id = $1",
-      [orderId],
-    );
-    const prevStatus = prev.rows[0]?.current_status ?? null;
-
-    // Update cached status on the order.
-    const orderStatus = result.status === "delivered" ? "delivered" : undefined;
-    await sql.query(
-      `UPDATE orders
-          SET current_status = $2,
-              current_status_text = $3,
-              last_synced_at = now()
-              ${orderStatus ? ", order_status = 'delivered'" : ""}
-        WHERE id = $1`,
-      [orderId, result.status, result.statusText],
-    );
-
-    // Fire lifecycle events on transition into delivered / exception.
-    if (result.status !== prevStatus) {
-      if (result.status === "delivered") {
-        emitEvent({ kind: "order_delivered", orderId, branchId: leg.branchId });
-      } else if (result.status === "exception") {
-        emitEvent({ kind: "order_exception", orderId, branchId: leg.branchId, statusText: result.statusText });
+      const adapter = resolveAdapter(leg.carrier);
+      if (!adapter) {
+        legResults.push({
+          legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
+          isActive: leg.isActive, status: "error", error: `no adapter for "${leg.carrier}"`,
+        });
+        continue;
       }
+
+      let result: NormalizedTracking | null;
+      try {
+        result = await adapter.track(leg.trackingNumber);
+      } catch (e) {
+        legResults.push({
+          legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
+          isActive: leg.isActive, status: "error",
+          error: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
+
+      if (result === null) {
+        legResults.push({
+          legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
+          isActive: leg.isActive, status: "not_found",
+        });
+        continue;
+      }
+
+      const newEvents = await writeEvents(sql, leg, result);
+      totalNewEvents += newEvents;
+      legResults.push({
+        legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
+        isActive: leg.isActive, status: "synced",
+        normalizedStatus: result.status, newEvents,
+      });
+
+      // Handoff detection stays scoped to the active APX leg only, same rule
+      // as before — we don't want a stale inactive leg spawning new legs.
+      if (leg.isActive && leg.carrier === "smartcargo-apx") {
+        handoffCreated = await maybeCreateHandoffLeg(sql, leg, result);
+      }
+
+      if (leg.isActive) {
+        activeResult = result;
+        activeLeg = leg;
+      }
+    }
+
+    // Cached order-level status still reflects the ACTIVE leg only — that's
+    // "where the shipment currently is," same semantics as before.
+    if (activeResult && activeLeg) {
+      const prev = await sql.query<{ current_status: string | null }>(
+        "SELECT current_status FROM orders WHERE id = $1",
+        [orderId],
+      );
+      const prevStatus = prev.rows[0]?.current_status ?? null;
+
+      const orderStatus = activeResult.status === "delivered" ? "delivered" : undefined;
+      await sql.query(
+        `UPDATE orders
+            SET current_status = $2,
+                current_status_text = $3,
+                last_synced_at = now()
+                ${orderStatus ? ", order_status = 'delivered'" : ""}
+          WHERE id = $1`,
+        [orderId, activeResult.status, activeResult.statusText],
+      );
+
+      if (activeResult.status !== prevStatus) {
+        if (activeResult.status === "delivered") {
+          emitEvent({ kind: "order_delivered", orderId, branchId: activeLeg.branchId });
+        } else if (activeResult.status === "exception") {
+          emitEvent({ kind: "order_exception", orderId, branchId: activeLeg.branchId, statusText: activeResult.statusText });
+        }
+      }
+    } else {
+      // No active leg synced successfully (e.g. all errored/not_found) —
+      // still bump last_synced_at so the poller doesn't hammer it immediately.
+      await sql.query("UPDATE orders SET last_synced_at = now() WHERE id = $1", [orderId]);
     }
 
     return {
       orderId,
-      carrier: leg.carrier,
+      carrier: activeCarrier,
       status: "synced",
-      normalizedStatus: result.status,
-      newEvents,
+      normalizedStatus: activeResult?.status,
+      newEvents: totalNewEvents,
       handoffCreated,
+      legs: legResults,
     };
   }).catch((e): SyncResult => ({
     orderId,
-    carrier: leg?.carrier ?? null,
+    carrier: activeCarrier,
     status: "error",
     error: e instanceof Error ? e.message : String(e),
   }));
