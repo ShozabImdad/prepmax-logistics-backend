@@ -70,7 +70,9 @@ export async function publicTrack(trackingCode: string): Promise<PublicTracking 
     return {
       trackingCode: order.tracking_code,
       status: order.current_status,
-      statusText: order.current_status_text,
+      // Redact carrier branding — the cached status text is a carrier event
+      // string (e.g. "Processed at APX LOGISTICS Facility") and leaks otherwise.
+      statusText: redactCarrier(order.current_status_text),
       destinationCity: order.receiver_city,
       destinationCountry: order.receiver_country,
       estimatedDelivery: null, // not yet captured as a structured field

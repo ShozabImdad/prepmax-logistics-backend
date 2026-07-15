@@ -4,6 +4,7 @@
 import type { Sql } from "../../db/pool.js";
 import { OrderError, attachLegsInTx, insertBoxesAndItems } from "./service.js";
 import type { LegInput, EditOrderInput } from "./schema.js";
+import { redactCarrier } from "../tracking/sanitize.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -399,7 +400,11 @@ export async function getOrderDetail(
       trackingCode: order.tracking_code,
       orderStatus: order.order_status,
       currentStatus: order.current_status,
-      currentStatusText: order.current_status_text,
+      // Customers must not see the real carrier; the cached status text is a
+      // carrier event string, so redact it for the portal (staff see it raw).
+      currentStatusText: opts.forCustomer
+        ? redactCarrier(order.current_status_text)
+        : order.current_status_text,
       lastSyncedAt: order.last_synced_at,
       sender: opts.forCustomer ? undefined : {
         name: order.sender_name, company: order.sender_company, phone: order.sender_phone,
@@ -430,9 +435,15 @@ export async function getOrderDetail(
       totalChargeableKg: Number(
         boxesOut.reduce((s, b) => s + (b.chargeableKg as number), 0).toFixed(3),
       ),
+      // For customers, redact carrier branding from the event text (location +
+      // description) and hide the carrier field entirely. Staff see it raw.
       trackingEvents: events.rows.map((e) => ({
-        time: e.event_time, timeRaw: e.event_time_raw, location: e.location,
-        description: e.description, carrier: opts.forCustomer ? undefined : e.carrier,
+        time: e.event_time, timeRaw: e.event_time_raw,
+        location: opts.forCustomer ? redactCarrier(e.location) : e.location,
+        description: opts.forCustomer
+          ? (redactCarrier(e.description) ?? "Shipment update")
+          : e.description,
+        carrier: opts.forCustomer ? undefined : e.carrier,
         leg: e.sequence,
       })),
       createdAt: order.created_at,
