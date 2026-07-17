@@ -134,6 +134,9 @@ export function awbHtml(d: DocData, barcode: string): string {
       <td class="num">${r.quantity}</td>
       <td class="num">$ ${r.value.toFixed(2)}</td>
     </tr>`).join("");
+    const priceLine = d.price != null
+  ? `${Number(d.price).toFixed(2)} ${esc(d.priceCurrency ?? "")}`.trim()
+  : "—";
   const totalValue = itemRows.reduce((s, r) => s + r.value, 0);
   const shipDate = fmtDate(d.createdAt);
   const cnic = d.sender.cnic || "—";
@@ -216,7 +219,11 @@ export function awbHtml(d: DocData, barcode: string): string {
             <td class="num" style="font-weight:800;">$ ${totalValue.toFixed(2)}</td>
           </tr>
         </tbody>
-      </table>
+    </table>
+
+      <div class="r bb">
+        <div class="kv" style="padding:4px 6px;"><b>Shipping Price:</b> ${priceLine}</div>
+      </div>
 
       <div class="bb" style="border-top:1px solid #000;">
         <div style="text-align:center; font-weight:800; text-decoration:underline; padding:5px;">TO WHOM IT MAY CONCERN</div>
@@ -249,14 +256,13 @@ export function awbHtml(d: DocData, barcode: string): string {
 export function receiptHtml(d: DocData, barcode: string): string {
   
   const pkgRows = d.boxes.map((b, i) => `<tr>
-      <td class="num">${i + 1}</td>
-      <td>${b.items.length ? b.items.map((it) => `${esc(it.description)} ×${it.quantity}`).join(", ") : "<span class='muted'>—</span>"}</td>
-      <td class="num">${b.weightKg.toFixed(2)}</td>
-      <td class="num">${b.lengthCm}×${b.widthCm}×${b.heightCm}</td>
-      <td class="num">${b.chargeableKg.toFixed(2)}</td>
+      ...
     </tr>`).join("");
 
   const declared = d.declaredValue != null ? `${d.declaredValue.toFixed(2)} ${esc(d.currency ?? "")}` : "—";
+  const priceLine = d.price != null
+    ? `${Number(d.price).toFixed(2)} ${esc(d.priceCurrency ?? "")}`.trim()
+    : "—";
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
     .kv { display:grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
@@ -288,11 +294,11 @@ export function receiptHtml(d: DocData, barcode: string): string {
         <div class="k">Service type</div><div>${esc(d.serviceType ?? "—")}</div>
         <div class="k">Contents</div><div>${esc(d.contentsNature ?? "—")}</div>
         <div class="k">Declared value</div><div>${esc(declared)}</div>
+        <div class="k">Shipping price</div><div>${esc(priceLine)}</div>
         <div class="k">Pieces</div><div>${d.pieceCount}</div>
         <div class="k">Total chargeable weight</div><div><strong>${d.totalChargeableKg.toFixed(2)} kg</strong></div>
       </div>
     </div>
-
     <div class="lbl" style="margin:6px 0 3px; font-size:8px; text-transform:uppercase; color:#555; font-weight:700;">Package details</div>
     <table class="cargo">
       <thead><tr>
@@ -323,7 +329,7 @@ export function receiptHtml(d: DocData, barcode: string): string {
 // TEMPLATE 3: SHIPPING BILL (courier label / customs-style bill)
 // ============================================================================
 export function shippingBillHtml(d: DocData, barcode: string): string {
- const isDox = d.contentsNature === "documents";
+  const isDox = d.contentsNature === "documents";
   const doxTag = isDox ? "DOX" : "NON-DOX";
   const carrierLabel = d.carrier ? d.carrier.toUpperCase() : null;
   const routeLine = [
@@ -333,7 +339,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
     carrierLabel ? `VIA ${carrierLabel}` : null,
   ].filter(Boolean).join(" ") || "—";
   const billDate = fmtDate(d.createdAt);
- const origin = [d.branchCity, d.originCountry || d.sender.country].filter(Boolean).join("-").toUpperCase() || "—";
+  const origin = [d.branchCity, d.originCountry || d.sender.country].filter(Boolean).join("-").toUpperCase() || "—";
 
   const fromAddr = [d.sender.address, [d.sender.city, d.sender.postcode].filter(Boolean).join(" ")]
     .filter(Boolean).map(esc).join(" ");
@@ -347,29 +353,37 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
 
   const pieces = `${String(d.pieceCount).padStart(1, "0")} / ${String(d.pieceCount).padStart(1, "0")}`;
 
-    return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
-    .bill { border: 2px solid #000; }
-    .bill .top { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:2px solid #000; }
-    .bill .route { font-size:11px; font-weight:600; }
-    .bill .route-date { font-size:11px; margin-top:2px; }
-    .bill .doxtag { background:#333; color:#fff; font-weight:800; letter-spacing:1px; padding:6px 14px; font-size:13px; }
-    .bill .courier { font-size:22px; font-weight:800; letter-spacing:0.5px; }
-    .bill .row { display:flex; border-bottom:2px solid #000; }
-    .bill .row > .cell { padding:10px 12px; }
-    .bill .row > .cell.br { border-right:2px solid #000; }
-    .bill .lbl3 { font-weight:700; font-size:11px; }
-    .bill .val3 { font-size:13px; font-weight:700; margin-top:2px; }
-    .bill .contact { font-weight:700; margin-top:4px; }
-    .bill .banner { background:#c9c9c9; text-align:center; font-weight:800; font-size:18px; padding:8px; letter-spacing:1px; }
-    .bill .meta { display:flex; border-bottom:2px solid #000; }
-    .bill .meta > .cell { flex:1; padding:10px 12px; border-right:1px solid #000; }
-    .bill .meta > .cell:last-child { border-right:0; }
-    .bill .meta .k { font-weight:700; font-size:11px; }
-    .bill .meta .v { font-size:13px; margin-top:2px; }
-    .bill .awb { padding:10px 12px; font-weight:800; font-size:14px; border-bottom:1px solid #000; }
-    .bill .barcodewrap { padding:10px 12px; display:flex; align-items:flex-end; justify-content:space-between; }
-    .bill .barcodewrap .barcode-img { height:64px; }
-    .bill .barcodewrap .logo-img { height:48px; width:auto; object-fit:contain; opacity:0.85; }
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
+    .page {
+      width: 386px;
+      height: 575px;
+      min-height: 0;
+      padding: 6px;
+      overflow: hidden;
+      font-size: 9px;
+    }
+    .bill { border: 1.5px solid #000; height: 100%; display: flex; flex-direction: column; }
+.bill .top { display:flex; justify-content:space-between; align-items:center; padding:9px 8px; border-bottom:1.5px solid #000; }
+.bill .route { font-size:9px; font-weight:600; }
+.bill .route-date { font-size:9px; margin-top:2px; }
+.bill .doxtag { background:#333; color:#fff; font-weight:800; letter-spacing:0.5px; padding:4px 10px; font-size:10px; }
+.bill .courier { font-size:15px; font-weight:800; letter-spacing:0.3px; }
+.bill .row { display:flex; border-bottom:1.5px solid #000; }
+.bill .row > .cell { padding:9px 8px; }
+.bill .row > .cell.br { border-right:1.5px solid #000; }
+.bill .lbl3 { font-weight:700; font-size:9px; }
+.bill .val3 { font-size:10.5px; font-weight:700; margin-top:2px; }
+.bill .contact { font-weight:700; margin-top:3px; font-size:9px; }
+.bill .banner { background:#c9c9c9; text-align:center; font-weight:800; font-size:14px; padding:6px; letter-spacing:0.5px; }
+.bill .meta { display:flex; border-bottom:1.5px solid #000; }
+.bill .meta > .cell { flex:1; padding:8px; border-right:1px solid #000; }
+.bill .meta > .cell:last-child { border-right:0; }
+.bill .meta .k { font-weight:700; font-size:9px; }
+.bill .meta .v { font-size:10.5px; margin-top:2px; }
+.bill .awb { padding:8px; font-weight:800; font-size:11px; border-bottom:1px solid #000; }
+.bill .barcodewrap { padding:8px; display:flex; align-items:center; justify-content:space-between; }
+.bill .barcodewrap .barcode-img { height:48px; }
+.bill .barcodewrap .logo-img { height:32px; width:auto; object-fit:contain; opacity:0.85; }
   </style></head><body>
   <div class="page">
     <div class="bill">
@@ -380,7 +394,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
         </div>
         <div style="text-align:right;">
           <div class="doxtag">${doxTag}</div>
-          <div class="courier" style="margin-top:6px;">${esc(d.branchName || "LOGISTICS")}</div>
+          <div class="courier" style="margin-top:3px;">${esc(d.branchName || "LOGISTICS")}</div>
         </div>
       </div>
 
@@ -405,7 +419,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
         <div class="cell" style="flex:5;">
           <div class="lbl3">Contact</div>
           <div class="contact">${esc(d.receiver.name ?? "—")}</div>
-          ${d.receiver.phone ? `<div style="margin-top:6px;">${esc(d.receiver.phone)}</div>` : ""}
+          ${d.receiver.phone ? `<div style="margin-top:3px;">${esc(d.receiver.phone)}</div>` : ""}
         </div>
       </div>
 
@@ -417,7 +431,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
           <div class="v">${esc(d.contentsNature ?? "—")}</div>
         </div>
         <div class="cell">
-          <div class="k">Shipment Weight:</div>
+          <div class="k">Wt:</div>
           <div class="v">${d.totalGrossKg.toFixed(2)}</div>
         </div>
         <div class="cell">

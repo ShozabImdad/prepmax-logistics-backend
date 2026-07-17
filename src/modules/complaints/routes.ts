@@ -10,7 +10,10 @@ import { asyncHandler } from "../../lib/http.js";
 import { requireStaff, requireCustomer, requirePermission } from "../../middleware/auth.js";
 import { isStaff, isCustomer } from "../auth/types.js";
 import { createComplaintSchema, updateComplaintSchema } from "./schema.js";
-import { createComplaint, listComplaints, listCustomerComplaints, updateComplaint, ComplaintError } from "./queries.js";
+import {
+  createComplaint, listComplaints, listCustomerComplaints, updateComplaint,
+  listComplaintMessages, addComplaintMessage, verifyComplaintOwnership, ComplaintError,
+} from "./queries.js";
 import { createBranchNotification } from "../notifications/service.js";
 
 function handleComplaintError(err: unknown, res: Response): void {
@@ -122,6 +125,72 @@ complaintRouter.patch(
           updatedAt: result.updatedAt,
         },
       });
+    } catch (err) {
+      return handleComplaintError(err, res);
+    }
+  }),
+);
+complaintRouter.get(
+  "/:publicId/messages",
+  requireStaff,
+  requirePermission("complaints.view"),
+  asyncHandler(async (req, res) => {
+    try {
+      const messages = await listComplaintMessages(req.db!, param(req.params.publicId));
+      return res.json({ messages });
+    } catch (err) {
+      return handleComplaintError(err, res);
+    }
+  }),
+);
+
+complaintRouter.post(
+  "/:publicId/messages",
+  requireStaff,
+  requirePermission("complaints.manage"),
+  asyncHandler(async (req, res) => {
+    const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+    if (!body) return res.status(400).json({ error: "Message body is required" });
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    try {
+      const message = await addComplaintMessage(req.db!, param(req.params.publicId), "staff", staff.userId, body);
+      return res.status(201).json({ message });
+    } catch (err) {
+      return handleComplaintError(err, res);
+    }
+  }),
+);
+
+// ── CUSTOMER: message thread on own complaint ───────────────────────────────
+portalComplaintRouter.get(
+  "/:publicId/messages",
+  requireCustomer,
+  asyncHandler(async (req, res) => {
+    const cust = req.auth!;
+    if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
+    try {
+      await verifyComplaintOwnership(req.db!, param(req.params.publicId), cust.customerId);
+      const messages = await listComplaintMessages(req.db!, param(req.params.publicId));
+      return res.json({ messages });
+    } catch (err) {
+      return handleComplaintError(err, res);
+    }
+  }),
+);
+
+portalComplaintRouter.post(
+  "/:publicId/messages",
+  requireCustomer,
+  asyncHandler(async (req, res) => {
+    const body = typeof req.body?.body === "string" ? req.body.body.trim() : "";
+    if (!body) return res.status(400).json({ error: "Message body is required" });
+    const cust = req.auth!;
+    if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
+    try {
+      await verifyComplaintOwnership(req.db!, param(req.params.publicId), cust.customerId);
+      const message = await addComplaintMessage(req.db!, param(req.params.publicId), "customer", cust.customerId, body);
+      return res.status(201).json({ message });
     } catch (err) {
       return handleComplaintError(err, res);
     }

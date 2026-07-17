@@ -1,21 +1,14 @@
-// HTML -> A4 PDF via headless Chromium (Patchright — already a dependency for
-// the tracking adapters, so no new package). One shared browser instance is
-// reused across renders since launching Chromium is the expensive part.
-
 import { chromium, type Browser } from "patchright";
 
 let browserPromise: Promise<Browser> | null = null;
 function getBrowser(): Promise<Browser> {
   if (!browserPromise) {
-    // Use the system Chrome (channel: "chrome") like the tracking adapters, so
-    // we reuse the installed browser instead of Patchright's separate bundled
-    // Chromium download (which isn't installed on the server).
     browserPromise = chromium.launch({ headless: true, channel: "chrome" });
   }
   return browserPromise;
 }
 
-/** Render a full HTML document string to an A4 PDF buffer. */
+/** Render a full HTML document string to a fixed-size PDF buffer. */
 export async function htmlToPdf(html: string): Promise<Buffer> {
   const browser = await getBrowser();
   const context = await browser.newContext();
@@ -23,9 +16,10 @@ export async function htmlToPdf(html: string): Promise<Buffer> {
   try {
     await page.setContent(html, { waitUntil: "networkidle" });
     const pdf = await page.pdf({
-      format: "A4",
+      width: "386px",
+      height: "575px",
       printBackground: true,
-      margin: { top: "0", right: "0", bottom: "0", left: "0" }, // templates own their margins
+      margin: { top: "0", right: "0", bottom: "0", left: "0" },
     });
     return Buffer.from(pdf);
   } finally {

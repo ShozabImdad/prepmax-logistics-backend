@@ -38,6 +38,8 @@ export interface DocData {
   currency: string | null;
   duties: string | null;
   handlingFlags: string[];
+  price?: number | string | null;
+priceCurrency?: string | null;
   notes: string | null;
   boxes: DocBox[];
   totalGrossKg: number;
@@ -120,29 +122,31 @@ export async function loadDocData(run: Run, orderPublicId: string): Promise<DocD
     const totalGrossKg = round3(boxes.reduce((s, b) => s + b.weightKg, 0));
     const totalChargeableKg = round3(boxes.reduce((s, b) => s + b.chargeableKg, 0));
 
-    return {
-      trackingCode: o.tracking_code,
-      awbNumber: o.awb_number,
-      branchName: o.branch_name,
-      branchCity: o.branch_city,
-      createdAt: o.created_at,
-      sender: contact(o, "sender"),
-      receiver: contact(o, "receiver"),
-    serviceType: o.service_type,
-      serviceLevel: o.service_level,
-      originCountry: o.origin_country,
-      destinationCountry: o.destination_country,
-      carrier,
-      contentsNature: o.contents_nature,
-      declaredValue: o.declared_total != null ? Number(o.declared_total) : null,
-      currency: o.declared_currency,
-      duties: o.duties,
-      handlingFlags: (o.handling_flags as string[]) ?? [],
-      notes: o.notes,
-      boxes,
-      totalGrossKg,
-      totalChargeableKg,
-      pieceCount: boxes.length,
-    };
+  return {
+  trackingCode: o.tracking_code,
+  awbNumber: o.awb_number,
+  branchName: o.branch_name,
+  branchCity: o.branch_city,
+  createdAt: o.created_at,
+  sender: contact(o, "sender"),
+  receiver: contact(o, "receiver"),
+  serviceType: o.service_type,
+  serviceLevel: o.service_level,
+  originCountry: o.origin_country,
+  destinationCountry: o.destination_country,
+  carrier,
+  contentsNature: o.contents_nature,
+  declaredValue: o.declared_total != null ? Number(o.declared_total) : null,
+  currency: o.declared_currency,
+  duties: o.duties,
+  handlingFlags: (o.handling_flags as string[]) ?? [],
+  price: o.price != null ? Number(o.price) : null,
+  priceCurrency: o.price_currency,
+  notes: o.notes,
+  boxes,
+  totalGrossKg,
+  totalChargeableKg,
+  pieceCount: boxes.length,
+};
   });
 }

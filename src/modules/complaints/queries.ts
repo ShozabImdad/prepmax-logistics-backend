@@ -165,3 +165,101 @@ export async function updateComplaint(
     return { orderId: current.order_id, branchId: current.branch_id, ...mapRow(full[0]!) };
   });
 }
+export interface ComplaintMessageRow {
+  publicId: string;
+  complaintPublicId: string;
+  sender: "customer" | "staff";
+  authorName: string | null;
+  authorEmail: string | null;
+  body: string;
+  createdAt: string;
+}
+
+function mapMessageRow(r: Record<string, unknown>): ComplaintMessageRow {
+  return {
+    publicId: r.public_id as string,
+    complaintPublicId: r.complaint_public_id as string,
+    sender: r.sender as "customer" | "staff",
+    authorName: (r.author_name as string | null) ?? null,
+    authorEmail: (r.author_email as string | null) ?? null,
+    body: r.body as string,
+    createdAt: r.created_at as string,
+  };
+}
+
+const MESSAGE_SELECT = `
+  cm.public_id, c.public_id AS complaint_public_id, cm.sender, cm.body, cm.created_at,
+  COALESCE(cu.full_name, u.full_name) AS author_name,
+  COALESCE(cu.email, u.email) AS author_email
+`;
+
+async function resolveComplaintId(sql: Sql, complaintPublicId: string): Promise<string> {
+  const { rows } = await sql.query<{ id: string }>(
+    "SELECT id FROM complaints WHERE public_id = $1",
+    [complaintPublicId],
+  );
+  if (!rows[0]) throw new ComplaintError(404, "Complaint not found");
+  return rows[0].id;
+}
+
+export async function listComplaintMessages(run: Run, complaintPublicId: string): Promise<ComplaintMessageRow[]> {
+  return run(async (sql) => {
+    const complaintId = await resolveComplaintId(sql, complaintPublicId);
+    const { rows } = await sql.query(
+      `SELECT ${MESSAGE_SELECT}
+         FROM complaint_messages cm
+         JOIN complaints c ON c.id = cm.complaint_id
+         LEFT JOIN customers cu ON cu.id = cm.author_id AND cm.sender = 'customer'
+         LEFT JOIN users u ON u.id = cm.author_id AND cm.sender = 'staff'
+        WHERE cm.complaint_id = $1
+        ORDER BY cm.created_at ASC`,
+      [complaintId],
+    );
+    return rows.map(mapMessageRow);
+  });
+}
+
+export async function addComplaintMessage(
+  run: Run,
+  complaintPublicId: string,
+  sender: "customer" | "staff",
+  authorId: string,
+  body: string,
+): Promise<ComplaintMessageRow> {
+  return run(async (sql) => {
+    const complaintId = await resolveComplaintId(sql, complaintPublicId);
+    const pid = publicId();
+    await sql.query(
+      `INSERT INTO complaint_messages (public_id, branch_id, complaint_id, sender, author_id, body)
+       SELECT $1, c.branch_id, $2, $3, $4, $5 FROM complaints c WHERE c.id = $2`,
+      [pid, complaintId, sender, authorId, body],
+    );
+    const { rows } = await sql.query(
+      `SELECT ${MESSAGE_SELECT}
+         FROM complaint_messages cm
+         JOIN complaints c ON c.id = cm.complaint_id
+         LEFT JOIN customers cu ON cu.id = cm.author_id AND cm.sender = 'customer'
+         LEFT JOIN users u ON u.id = cm.author_id AND cm.sender = 'staff'
+        WHERE cm.public_id = $1`,
+      [pid],
+    );
+    return mapMessageRow(rows[0]!);
+  });
+}
+/** Verifies a complaint belongs to the given customer. Used by portal routes only. */
+export async function verifyComplaintOwnership(
+  run: Run,
+  complaintPublicId: string,
+  customerId: string,
+): Promise<void> {
+  return run(async (sql) => {
+    const { rows } = await sql.query<{ customer_id: string }>(
+      "SELECT customer_id FROM complaints WHERE public_id = $1",
+      [complaintPublicId],
+    );
+    if (!rows[0]) throw new ComplaintError(404, "Complaint not found");
+    if (rows[0].customer_id !== customerId) {
+      throw new ComplaintError(403, "You can only view your own complaints");
+    }
+  });
+}

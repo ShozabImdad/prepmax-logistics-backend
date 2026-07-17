@@ -328,13 +328,19 @@ accountsRouter.get(
   requirePermission("customers.view"),
   asyncHandler(async (req, res) => {
     const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const branchPublicId = typeof req.query.branchPublicId === "string" ? req.query.branchPublicId : "";
     const rows = await req.db!(async (sql) => {
+      const conds: string[] = [];
       const params: unknown[] = [];
-      let where = "";
       if (search) {
         params.push(`%${search}%`);
-        where = `WHERE full_name ILIKE $1 OR email ILIKE $1 OR COALESCE(company_name,'') ILIKE $1`;
+        conds.push(`(full_name ILIKE $${params.length} OR email ILIKE $${params.length} OR COALESCE(company_name,'') ILIKE $${params.length})`);
       }
+      if (branchPublicId) {
+        params.push(branchPublicId);
+        conds.push(`branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
+      }
+      const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
       const r = await sql.query(
         `SELECT public_id, full_name, email, phone, company_name, ntn, address, is_active, created_at
            FROM customers ${where} ORDER BY created_at DESC LIMIT 200`,
