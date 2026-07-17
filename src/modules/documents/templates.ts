@@ -393,9 +393,9 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
 .bill .meta .k { font-weight:700; font-size:9px; }
 .bill .meta .v { font-size:10.5px; margin-top:2px; }
 .bill .awb { padding:8px; font-weight:800; font-size:11px; border-bottom:1px solid #000; }
-.bill .barcodewrap { padding:10px 8px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; }
-.bill .barcodewrap .barcode-img { height:78px; width:auto; max-width:100%; }
-.bill .barcodewrap .logo-img { height:24px; width:auto; object-fit:contain; opacity:0.85; margin-top:2px; }
+.bill .barcodewrap { position:relative; padding:10px 8px; display:flex; align-items:center; justify-content:space-between; }
+.bill .barcodewrap .barcode-img { height:86px; width:auto; max-width:100%; }
+.bill .barcodewrap .logo-img { position:absolute; right:8px; bottom:0px;top:10px; height:32px; width:auto; object-fit:contain; opacity:0.85; }
   </style></head><body>
   <div class="label-page">
     <div class="bill">
