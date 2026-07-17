@@ -17,6 +17,7 @@ import { staffRouter } from "./modules/staff/routes.js";
 import { analyticsRouter } from "./modules/analytics/routes.js";
 import { complaintRouter, portalComplaintRouter } from "./modules/complaints/routes.js";
 import { financeRouter } from "./modules/finance/routes.js";
+import { manifestRouter } from "./modules/manifest/routes.js";
 import { quoteRouter, portalQuoteRouter } from "./modules/quotes/routes.js";
 
 export function createApp() {
@@ -49,6 +50,7 @@ export function createApp() {
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/complaints", complaintRouter);
   app.use("/api/finance", financeRouter);
+  app.use("/api/manifests", manifestRouter);
   app.use("/api/portal/complaints", portalComplaintRouter);
   app.use("/api/quotes", quoteRouter);
   app.use("/api/portal/quotes", portalQuoteRouter);

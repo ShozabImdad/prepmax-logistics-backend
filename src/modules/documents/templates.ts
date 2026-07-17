@@ -92,6 +92,11 @@ function addressLines(c: DocContact): string {
 
 // ============================================================================
 // CORE CSS STYLE STACK
+// NOTE: `.page` here is the ONLY definition of that class in this file. It is
+// the A4 page used by the AWB and the Receipt. The Shipping Bill (courier
+// label) below intentionally does NOT use `.page` at all — it defines its
+// own `.label-page` class — so its small fixed-size layout can never
+// collide with or override the A4 sizing here.
 // ============================================================================
 const SHARED_CSS = `
   * { box-sizing: border-box; }
@@ -122,7 +127,7 @@ const SHARED_CSS = `
 `;
 
 // ============================================================================
-// TEMPLATE 1: AIR WAYBILL (AWB)
+// TEMPLATE 1: AIR WAYBILL (AWB) — A4
 // ============================================================================
 export function awbHtml(d: DocData, barcode: string): string {
   const itemRows = d.boxes
@@ -251,7 +256,7 @@ export function awbHtml(d: DocData, barcode: string): string {
 }
 
 // ============================================================================
-// TEMPLATE 2: SHIPPING RECEIPT
+// TEMPLATE 2: SHIPPING RECEIPT — A4
 // ============================================================================
 export function receiptHtml(d: DocData, barcode: string): string {
   
@@ -327,6 +332,9 @@ export function receiptHtml(d: DocData, barcode: string): string {
 
 // ============================================================================
 // TEMPLATE 3: SHIPPING BILL (courier label / customs-style bill)
+// Small fixed-size label. Uses its own `.label-page` class instead of
+// `.page`, so it can never collide with / override the A4 `.page` used by
+// the AWB and Receipt above. A visible border now wraps the whole label.
 // ============================================================================
 export function shippingBillHtml(d: DocData, barcode: string): string {
   const isDox = d.contentsNature === "documents";
@@ -354,13 +362,17 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
   const pieces = `${String(d.pieceCount).padStart(1, "0")} / ${String(d.pieceCount).padStart(1, "0")}`;
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
-    .page {
+    /* Standalone label page — deliberately NOT named .page. */
+    .label-page {
       width: 386px;
       height: 575px;
       min-height: 0;
       padding: 6px;
       overflow: hidden;
       font-size: 9px;
+      box-sizing: border-box;
+      border: 2px solid #000;      /* visible border around the whole label */
+      margin: 0 auto;
     }
     .bill { border: 1.5px solid #000; height: 100%; display: flex; flex-direction: column; }
 .bill .top { display:flex; justify-content:space-between; align-items:center; padding:9px 8px; border-bottom:1.5px solid #000; }
@@ -381,11 +393,11 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
 .bill .meta .k { font-weight:700; font-size:9px; }
 .bill .meta .v { font-size:10.5px; margin-top:2px; }
 .bill .awb { padding:8px; font-weight:800; font-size:11px; border-bottom:1px solid #000; }
-.bill .barcodewrap { padding:8px; display:flex; align-items:center; justify-content:space-between; }
-.bill .barcodewrap .barcode-img { height:48px; }
-.bill .barcodewrap .logo-img { height:32px; width:auto; object-fit:contain; opacity:0.85; }
+.bill .barcodewrap { padding:10px 8px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; }
+.bill .barcodewrap .barcode-img { height:78px; width:auto; max-width:100%; }
+.bill .barcodewrap .logo-img { height:24px; width:auto; object-fit:contain; opacity:0.85; margin-top:2px; }
   </style></head><body>
-  <div class="page">
+  <div class="label-page">
     <div class="bill">
       <div class="top">
         <div>
@@ -446,7 +458,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
         </div>
       </div>
 
-      <div class="awb">Airway Bill - ${esc(d.awbNumber ?? "—")}</div>
+      <div class="awb">Tracking ID - ${esc(d.trackingCode)}</div>
       <div class="barcodewrap">
         <img class="barcode-img" src="${barcode}" alt="barcode">
         ${logoDataUri ? `<img class="logo-img" src="${logoDataUri}" alt="Prep Max Logistics">` : ""}

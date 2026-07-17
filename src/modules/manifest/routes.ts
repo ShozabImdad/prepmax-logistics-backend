@@ -11,7 +11,7 @@
 //   DELETE /api/manifests/:publicId/shipments/:orderPublicId  (open only)
 //   POST   /api/manifests/:publicId/close        (open -> closed)
 //   POST   /api/manifests/:publicId/dispatch     (closed -> dispatched)
-
+import { manifestPdf } from "./print.js";
 import { Router, type Request, type Response } from "express";
 import { asyncHandler } from "../../lib/http.js";
 import { requireStaff, requirePermission } from "../../middleware/auth.js";
@@ -117,6 +117,21 @@ manifestRouter.get(
   }),
 );
 
+manifestRouter.get(
+      "/:publicId/manifest.pdf",
+      requireStaff, requirePermission("manifest.view"),
+      asyncHandler(async (req, res) => {
+        try {
+          const manifest = await getManifest(req.db!, param(req.params.publicId));
+          const pdf = await manifestPdf(manifest);
+          res.setHeader("content-type", "application/pdf");
+          res.setHeader("content-disposition", `inline; filename="Manifest-${manifest.manifestNo}.pdf"`);
+          return res.end(pdf);
+        } catch (err) {
+          return handleManifestError(err, res);
+        }
+      }),
+    );
 // ── update header (open only) ───────────────────────────────────────────────
 manifestRouter.patch(
   "/:publicId",

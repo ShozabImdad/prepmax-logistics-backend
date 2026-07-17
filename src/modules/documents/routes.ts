@@ -27,7 +27,8 @@ documentRouter.get(
     const data = await loadDocData(req.db!, pubId(req.params.publicId));
     if (!data) return res.status(404).json({ error: "Order not found" });
     const barcode = await barcodeDataUri(data.trackingCode);
-    const pdf = await htmlToPdf(awbHtml(data, barcode));
+const pdf = await htmlToPdf(awbHtml(data, barcode), { format: "A4" });
+
     res.setHeader("content-type", "application/pdf");
     res.setHeader("content-disposition", `inline; filename="AWB-${data.trackingCode}.pdf"`);
     return res.end(pdf);
@@ -43,7 +44,7 @@ documentRouter.get(
     const data = await loadDocData(req.db!, pubId(req.params.publicId));
     if (!data) return res.status(404).json({ error: "Order not found" });
     const barcode = await barcodeDataUri(data.trackingCode);
-    const pdf = await htmlToPdf(receiptHtml(data, barcode));
+  const pdf = await htmlToPdf(receiptHtml(data, barcode), { format: "A4" });
     res.setHeader("content-type", "application/pdf");
     res.setHeader("content-disposition", `inline; filename="Receipt-${data.trackingCode}.pdf"`);
     return res.end(pdf);
@@ -57,7 +58,7 @@ documentRouter.get(
     const data = await loadDocData(req.db!, pubId(req.params.publicId));
     if (!data) return res.status(404).json({ error: "Order not found" });
     const barcode = await barcodeDataUri(data.awbNumber || data.trackingCode);
-    const pdf = await htmlToPdf(shippingBillHtml(data, barcode));
+  const pdf = await htmlToPdf(shippingBillHtml(data, barcode), { width: "386px", height: "575px" });
     res.setHeader("content-type", "application/pdf");
     res.setHeader("content-disposition", `inline; filename="ShippingBill-${data.trackingCode}.pdf"`);
     return res.end(pdf);
