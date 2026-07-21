@@ -67,6 +67,28 @@ export async function deleteOrder(run: Run, orderPublicId: string): Promise<void
   await run(async (sql) => {
     const order = await findOrderIdByPublicId(sql, orderPublicId);
     if (!order) throw new OrderError(404, "Order not found");
+
+    // manifest_shipments.order_id is ON DELETE RESTRICT — an order sitting
+    // on any manifest (open, closed, or dispatched) can't be deleted until
+    // it's taken off. Check first and give a clear, actionable error
+    // instead of letting the raw FK violation surface to the user.
+    const { rows: onManifest } = await sql.query<{ manifest_no: string; status: string }>(
+      `SELECT m.manifest_no, m.status
+         FROM manifest_shipments ms
+         JOIN manifests m ON m.id = ms.manifest_id
+        WHERE ms.order_id = $1`,
+      [order.id],
+    );
+    if (onManifest[0]) {
+      const { manifest_no, status } = onManifest[0];
+      throw new OrderError(
+        409,
+        status === "open"
+          ? `This order is on manifest ${manifest_no} — remove it from the manifest before deleting.`
+          : `This order is on manifest ${manifest_no} (${status}) and can't be removed from a non-open manifest. Delete blocked to preserve manifest history.`,
+      );
+    }
+
     await sql.query("DELETE FROM orders WHERE id = $1", [order.id]);
   });
 }

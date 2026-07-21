@@ -21,7 +21,7 @@ import {
 } from "./schema.js";
 import {
   DeManifestError,
-  listDeManifests, getDeManifest, createDeManifest, updateDeManifest,
+  listDeManifests, getDeManifest, createDeManifest, updateDeManifest, deleteDeManifest,
   scanShipment, updateShipment, removeShipment, completeDeManifest,
 } from "./queries.js";
 
@@ -162,6 +162,20 @@ deManifestRouter.delete(
     }
   }),
 );
+// ── delete (hard delete) ────────────────────────────────────────────────────
+deManifestRouter.delete(
+  "/:publicId",
+  requireStaff, requirePermission("demanifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      await deleteDeManifest(req.db!, param(req.params.publicId));
+      return res.json({ ok: true });
+    } catch (err) {
+      return handleDeManifestError(err, res);
+    }
+  }),
+);
+
 
 // ── complete (open -> completed; unscanned expected rows become 'missing') ─
 deManifestRouter.post(

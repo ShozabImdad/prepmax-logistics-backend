@@ -11,17 +11,19 @@
 //   DELETE /api/manifests/:publicId/shipments/:orderPublicId  (open only)
 //   POST   /api/manifests/:publicId/close        (open -> closed)
 //   POST   /api/manifests/:publicId/dispatch     (closed -> dispatched)
-import { manifestPdf } from "./print.js";
+import { manifestPdf, manifestShipmentsCsv, manifestShipmentsExcel } from "./print.js";
+
 import { Router, type Request, type Response } from "express";
 import { asyncHandler } from "../../lib/http.js";
 import { requireStaff, requirePermission } from "../../middleware/auth.js";
 import { isStaff } from "../auth/types.js";
+
 import {
   createManifestSchema, updateManifestSchema, addShipmentsSchema, listManifestsQuerySchema,
 } from "./schema.js";
 import {
   ManifestError,
-  listManifests, getManifest, createManifest, updateManifest,
+  listManifests, getManifest, createManifest, updateManifest, deleteManifest,
   addShipments, removeShipment, closeManifest, dispatchManifest, searchEligibleOrders,
 } from "./queries.js";
 
@@ -192,8 +194,22 @@ manifestRouter.post(
     }
   }),
 );
+// ── delete (hard delete) ────────────────────────────────────────────────────
+manifestRouter.delete(
+  "/:publicId",
+  requireStaff, requirePermission("manifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      await deleteManifest(req.db!, param(req.params.publicId));
+      return res.json({ ok: true });
+    } catch (err) {
+      return handleManifestError(err, res);
+    }
+  }),
+);
 
 // ── dispatch (closed -> dispatched) ─────────────────────────────────────────
+
 manifestRouter.post(
   "/:publicId/dispatch",
   requireStaff, requirePermission("manifest.manage"),
@@ -201,6 +217,40 @@ manifestRouter.post(
     try {
       const manifest = await dispatchManifest(req.db!, param(req.params.publicId));
       return res.json({ manifest });
+    } catch (err) {
+      return handleManifestError(err, res);
+    }
+  }),
+);
+
+// ── CSV export ───────────────────────────────────────────────────────────
+manifestRouter.get(
+  "/:publicId/shipments.csv",
+  requireStaff, requirePermission("manifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const manifest = await getManifest(req.db!, param(req.params.publicId));
+      const csv = manifestShipmentsCsv(manifest);
+      res.setHeader("content-type", "text/csv; charset=utf-8");
+      res.setHeader("content-disposition", `attachment; filename="Manifest-${manifest.manifestNo}.csv"`);
+      return res.end(csv);
+    } catch (err) {
+      return handleManifestError(err, res);
+    }
+  }),
+);
+
+// ── Excel export ─────────────────────────────────────────────────────────
+manifestRouter.get(
+  "/:publicId/shipments.xlsx",
+  requireStaff, requirePermission("manifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const manifest = await getManifest(req.db!, param(req.params.publicId));
+      const xlsx = manifestShipmentsExcel(manifest);
+      res.setHeader("content-type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("content-disposition", `attachment; filename="Manifest-${manifest.manifestNo}.xlsx"`);
+      return res.end(xlsx);
     } catch (err) {
       return handleManifestError(err, res);
     }

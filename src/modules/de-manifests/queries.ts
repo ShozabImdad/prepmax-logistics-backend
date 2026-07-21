@@ -488,6 +488,13 @@ export async function removeShipment(
   });
 }
 
+// ── Delete (hard delete, any status — cascades to de_manifest_shipments) ───
+export async function deleteDeManifest(run: Run, publicIdArg: string): Promise<void> {
+  await run(async (sql) => {
+    const { rowCount } = await sql.query("DELETE FROM de_manifests WHERE public_id = $1", [publicIdArg]);
+    if (!rowCount) throw new DeManifestError(404, "De-manifest not found");
+  });
+}
 // ── Complete (locks editing; any still-'pending' rows become 'missing') ────
 export async function completeDeManifest(
   run: Run,
