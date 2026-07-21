@@ -4,6 +4,7 @@
 import type { Sql } from "../../db/pool.js";
 import { publicId } from "../../lib/ids.js";
 import type { CreateQuoteInput, UpdateQuoteInput, QuoteBoxInput } from "./schema.js";
+import { pushToBranch } from "../notifications/sse.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -131,8 +132,8 @@ export async function updateQuote(
   input: UpdateQuoteInput,
 ): Promise<QuoteRow> {
   return run(async (sql) => {
-    const { rows: existing } = await sql.query<{ id: string }>(
-      "SELECT id FROM quotes WHERE public_id = $1",
+    const { rows: existing } = await sql.query<{ id: string; branch_id: string }>(
+      "SELECT id, branch_id FROM quotes WHERE public_id = $1",
       [quotePublicId],
     );
     if (!existing[0]) throw new QuoteError(404, "Quote not found");
@@ -164,7 +165,15 @@ export async function updateQuote(
     const { rows: full } = await sql.query(`SELECT ${SELECT_FIELDS} FROM quotes q WHERE q.public_id = $1`, [
       quotePublicId,
     ]);
-    return mapRow(full[0]!);
+    const result = mapRow(full[0]!);
+
+    pushToBranch(existing[0].branch_id, "quote_message", {
+      quotePublicId,
+      sender: "staff" as const,
+      statusChanged: input.status !== undefined || input.quotedPrice !== undefined,
+    });
+
+    return result;
   });
 }
 export interface QuoteMessageRow {
@@ -233,9 +242,10 @@ export async function addQuoteMessage(
   return run(async (sql) => {
     const quoteId = await resolveQuoteId(sql, quotePublicId);
     const pid = publicId();
-    await sql.query(
+    const { rows: branchRows } = await sql.query<{ branch_id: string }>(
       `INSERT INTO quote_messages (public_id, branch_id, quote_id, sender, author_id, body)
-       SELECT $1, q.branch_id, $2, $3, $4, $5 FROM quotes q WHERE q.id = $2`,
+       SELECT $1, q.branch_id, $2, $3, $4, $5 FROM quotes q WHERE q.id = $2
+       RETURNING branch_id`,
       [pid, quoteId, sender, authorId, body],
     );
     const { rows } = await sql.query(
@@ -247,7 +257,14 @@ export async function addQuoteMessage(
         WHERE qm.public_id = $1`,
       [pid],
     );
-    return mapMessageRow(rows[0]!);
+    const message = mapMessageRow(rows[0]!);
+
+    pushToBranch(branchRows[0]!.branch_id, "quote_message", {
+      quotePublicId,
+      sender,
+    });
+
+    return message;
   });
 }
 export async function verifyQuoteOwnership(

@@ -4,6 +4,7 @@
 import type { Sql } from "../../db/pool.js";
 import { publicId } from "../../lib/ids.js";
 import type { CreateComplaintInput, UpdateComplaintInput } from "./schema.js";
+import { pushToBranch } from "../notifications/sse.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -162,7 +163,15 @@ export async function updateComplaint(
         WHERE c.public_id = $1`,
       [complaintPublicId],
     );
-    return { orderId: current.order_id, branchId: current.branch_id, ...mapRow(full[0]!) };
+    const result = { orderId: current.order_id, branchId: current.branch_id, ...mapRow(full[0]!) };
+
+    pushToBranch(current.branch_id, "complaint_message", {
+      complaintPublicId,
+      sender: "staff" as const,
+      statusChanged: input.status !== undefined,
+    });
+
+    return result;
   });
 }
 export interface ComplaintMessageRow {
@@ -229,9 +238,10 @@ export async function addComplaintMessage(
   return run(async (sql) => {
     const complaintId = await resolveComplaintId(sql, complaintPublicId);
     const pid = publicId();
-    await sql.query(
+    const { rows: branchRows } = await sql.query<{ branch_id: string }>(
       `INSERT INTO complaint_messages (public_id, branch_id, complaint_id, sender, author_id, body)
-       SELECT $1, c.branch_id, $2, $3, $4, $5 FROM complaints c WHERE c.id = $2`,
+       SELECT $1, c.branch_id, $2, $3, $4, $5 FROM complaints c WHERE c.id = $2
+       RETURNING branch_id`,
       [pid, complaintId, sender, authorId, body],
     );
     const { rows } = await sql.query(
@@ -243,7 +253,19 @@ export async function addComplaintMessage(
         WHERE cm.public_id = $1`,
       [pid],
     );
-    return mapMessageRow(rows[0]!);
+    const message = mapMessageRow(rows[0]!);
+
+    // Reuses the same branch-scoped SSE hub notifications already push
+    // through (see modules/notifications/sse.ts). Any client connected on
+    // this branch — staff via /api/notifications/stream, customers via
+    // /api/portal/complaints/stream — gets told to refetch this thread.
+    const branchId = branchRows[0]!.branch_id;
+    pushToBranch(branchId, "complaint_message", {
+      complaintPublicId,
+      sender,
+    });
+
+    return message;
   });
 }
 /** Verifies a complaint belongs to the given customer. Used by portal routes only. */

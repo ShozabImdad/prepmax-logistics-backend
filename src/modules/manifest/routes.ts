@@ -1,4 +1,4 @@
-// Manifest routes — staff only, permission-gated (manifest.view / .manage),
+// Manifest routes — staff only, permission-gated (manifest.manage),
 // branch-scoped via RLS beneath req.db. Mirrors modules/finance/routes.ts.
 //
 // Layout:
@@ -62,7 +62,7 @@ async function resolveBranchId(
 // ── list ─────────────────────────────────────────────────────────────────
 manifestRouter.get(
   "/",
-  requireStaff, requirePermission("manifest.view"),
+  requireStaff, requirePermission("manifest.manage"),
   asyncHandler(async (req, res) => {
     const parsed = listManifestsQuerySchema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
@@ -76,8 +76,7 @@ manifestRouter.get(
   "/orders/search",
   requireStaff, requirePermission("manifest.manage"),
   asyncHandler(async (req, res) => {
-    const q = str(req.query.q);
-    if (!q) return res.json({ orders: [] });
+    const q = str(req.query.q) ?? "";
     const branchPublicId = str(req.query.branchPublicId);
     const orders = await searchEligibleOrders(req.db!, { q, branchPublicId });
     return res.json({ orders });
@@ -106,7 +105,7 @@ manifestRouter.post(
 // ── get one (header + shipments) ────────────────────────────────────────────
 manifestRouter.get(
   "/:publicId",
-  requireStaff, requirePermission("manifest.view"),
+  requireStaff, requirePermission("manifest.manage"),
   asyncHandler(async (req, res) => {
     try {
       const manifest = await getManifest(req.db!, param(req.params.publicId));
@@ -119,7 +118,7 @@ manifestRouter.get(
 
 manifestRouter.get(
       "/:publicId/manifest.pdf",
-      requireStaff, requirePermission("manifest.view"),
+      requireStaff, requirePermission("manifest.manage"),
       asyncHandler(async (req, res) => {
         try {
           const manifest = await getManifest(req.db!, param(req.params.publicId));

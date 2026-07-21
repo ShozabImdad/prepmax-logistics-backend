@@ -2,7 +2,7 @@
 //
 // Customer routes (/api/portal/quotes) let a logged-in customer request a
 // shipping quote and see their history. Staff routes (/api/quotes) are
-// permission-gated (quotes.view / .manage) and scoped by branch RLS beneath
+// permission-gated (quotes.manage) and scoped by branch RLS beneath
 // req.db, same as complaints.
 
 import { Router, type Response } from "express";
@@ -16,6 +16,7 @@ import {
 } from "./queries.js";
 
 import { createBranchNotification } from "../notifications/service.js";
+import { addSseClient } from "../notifications/sse.js";
 
 function handleQuoteError(err: unknown, res: Response): void {
   if (err instanceof QuoteError) {
@@ -31,6 +32,34 @@ function param(v: string | string[] | undefined): string {
 
 export const quoteRouter: Router = Router();       // staff: /api/quotes
 export const portalQuoteRouter: Router = Router(); // customer: /api/portal/quotes
+
+// ── CUSTOMER: live stream ────────────────────────────────────────────────────
+// Same shared hub as complaints (see modules/complaints/routes.ts) — a
+// customer connecting here and a staff member connected to
+// /api/notifications/stream both sit on the same branch-scoped fan-out, they
+// just listen for a different event name ("quote_message" vs "complaint_message").
+portalQuoteRouter.get("/stream", requireCustomer, (req, res) => {
+  const cust = req.auth!;
+  if (!isCustomer(cust)) {
+    res.status(403).end();
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const remove = addSseClient(cust.branchId, cust.customerId, res);
+  const heartbeat = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch { /* closed */ }
+  }, 25_000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    remove();
+  });
+});
 
 // ── CUSTOMER: request a quote ───────────────────────────────────────────────
 portalQuoteRouter.post(
@@ -79,7 +108,7 @@ portalQuoteRouter.get(
 quoteRouter.get(
   "/",
   requireStaff,
-  requirePermission("quotes.view"),
+  requirePermission("quotes.manage"),
   asyncHandler(async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     const quotes = await listQuotes(req.db!, { status });
@@ -110,7 +139,7 @@ quoteRouter.patch(
 quoteRouter.get(
   "/:publicId/messages",
   requireStaff,
-  requirePermission("quotes.view"),
+  requirePermission("quotes.manage"),
   asyncHandler(async (req, res) => {
     try {
       const messages = await listQuoteMessages(req.db!, param(req.params.publicId));

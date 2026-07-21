@@ -17,8 +17,11 @@ import { staffRouter } from "./modules/staff/routes.js";
 import { analyticsRouter } from "./modules/analytics/routes.js";
 import { complaintRouter, portalComplaintRouter } from "./modules/complaints/routes.js";
 import { financeRouter } from "./modules/finance/routes.js";
+import { portalFinanceRouter } from "./modules/finance/portal-routes.js";
 import { manifestRouter } from "./modules/manifest/routes.js";
+import { deManifestRouter } from "./modules/de-manifests/routes.js";
 import { quoteRouter, portalQuoteRouter } from "./modules/quotes/routes.js";
+import { contactsRouter, portalContactsRouter } from "./modules/contacts/routes.js";
 
 export function createApp() {
   const app = express();
@@ -50,10 +53,14 @@ export function createApp() {
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/complaints", complaintRouter);
   app.use("/api/finance", financeRouter);
+  app.use("/api/portal/finance", portalFinanceRouter);
   app.use("/api/manifests", manifestRouter);
+  app.use("/api/de-manifests", deManifestRouter);
   app.use("/api/portal/complaints", portalComplaintRouter);
   app.use("/api/quotes", quoteRouter);
   app.use("/api/portal/quotes", portalQuoteRouter);
+  app.use("/api/contacts", contactsRouter);
+  app.use("/api/portal/contacts", portalContactsRouter);
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));

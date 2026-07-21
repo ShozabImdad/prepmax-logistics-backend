@@ -185,6 +185,8 @@ export interface InvoiceRow {
   orderPublicId: string | null;
   branchPublicId: string;
   isCreditNote: boolean;
+  referencedInvoicePublicId: string | null;
+  referencedInvoiceNo: string | null;
   issueDate: string;
   dueDate: string | null;
   currency: string;
@@ -205,6 +207,7 @@ const INVOICE_FIELDS = `
   b.public_id AS branch_public_id,
   i.is_credit_note, i.issue_date, i.due_date, i.currency,
   i.subtotal, i.tax, i.total, i.amount_paid, i.status, i.notes,
+  ri.public_id AS referenced_invoice_public_id, ri.invoice_no AS referenced_invoice_no,
   i.created_at, i.updated_at
 `;
 
@@ -217,6 +220,8 @@ function mapInvoice(r: Record<string, unknown>): InvoiceRow {
     orderPublicId: (r.order_public_id as string | null) ?? null,
     branchPublicId: r.branch_public_id as string,
     isCreditNote: r.is_credit_note as boolean,
+    referencedInvoicePublicId: (r.referenced_invoice_public_id as string | null) ?? null,
+    referencedInvoiceNo: (r.referenced_invoice_no as string | null) ?? null,
     issueDate: r.issue_date as string,
     dueDate: (r.due_date as string | null) ?? null,
     currency: r.currency as string,
@@ -231,7 +236,7 @@ function mapInvoice(r: Record<string, unknown>): InvoiceRow {
   };
 }
 
-export async function listInvoices(run: Run, opts: { status?: string; q?: string; branchPublicId?: string } = {}): Promise<InvoiceRow[]> {
+export async function listInvoices(run: Run, opts: { status?: string; q?: string; branchPublicId?: string; customerPublicId?: string } = {}): Promise<InvoiceRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
@@ -247,12 +252,17 @@ export async function listInvoices(run: Run, opts: { status?: string; q?: string
       params.push(opts.branchPublicId);
       conds.push(`i.branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
     }
+    if (opts.customerPublicId) {
+      params.push(opts.customerPublicId);
+      conds.push(`cu.public_id = $${params.length}`);
+    }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const { rows } = await sql.query(
       `SELECT ${INVOICE_FIELDS} FROM invoices i
          JOIN customers cu ON cu.id = i.customer_id
          LEFT JOIN orders o ON o.id = i.order_id
          JOIN branches b ON b.id = i.branch_id
+         LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
          ${where}
         ORDER BY i.issue_date DESC, i.created_at DESC
         LIMIT 300`,
@@ -273,6 +283,7 @@ async function fetchInvoiceBySql(sql: Sql, publicIdArg: string): Promise<Invoice
        JOIN customers cu ON cu.id = i.customer_id
        LEFT JOIN orders o ON o.id = i.order_id
        JOIN branches b ON b.id = i.branch_id
+       LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
       WHERE i.public_id = $1`,
     [publicIdArg],
   );
@@ -355,6 +366,29 @@ export async function createInvoice(
       orderId = orderRows[0]!.id;
     }
 
+    // Resolve optional credit-note-to-invoice link. Only meaningful for
+    // credit notes, but we don't hard-require it (goodwill adjustments may
+    // not reference a specific invoice).
+    let referencedInvoiceId: string | null = null;
+    if (input.referencedInvoicePublicId) {
+      const { rows: refRows } = await sql.query<{ id: string; customer_id: string; total: string; amount_paid: string }>(
+        "SELECT id, customer_id, total, amount_paid FROM invoices WHERE public_id = $1",
+        [input.referencedInvoicePublicId],
+      );
+      if (!refRows[0]) throw new FinanceError(404, "Referenced invoice not found");
+      if (refRows[0].customer_id !== custRows[0]!.id) {
+        throw new FinanceError(400, "Referenced invoice belongs to a different customer");
+      }
+      if (input.isCreditNote) {
+        const creditAmount = input.items.reduce((s, it) => s + it.quantity * it.unitPrice, 0) + input.tax;
+        const remaining = Number(refRows[0].total) - Number(refRows[0].amount_paid);
+        if (creditAmount > remaining) {
+          throw new FinanceError(400, `Credit note amount exceeds the referenced invoice's remaining balance of ${remaining.toFixed(2)}`);
+        }
+      }
+      referencedInvoiceId = refRows[0]!.id;
+    }
+
     const invoiceNo = await nextInvoiceNo(sql, branchId);
     const pid = publicId();
     const { subtotal, tax, total } = computeInvoiceTotals(input.items, input.tax, input.isCreditNote);
@@ -363,12 +397,13 @@ export async function createInvoice(
     const { rows: invRows } = await sql.query<{ id: string }>(
       `INSERT INTO invoices
          (public_id, branch_id, invoice_no, customer_id, order_id, is_credit_note,
+          referenced_invoice_id,
           issue_date, due_date, currency, subtotal, tax, total, amount_paid,
           status, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,CURRENT_DATE),$8,$9,$10,$11,$12,0,$13,$14,$15)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,CURRENT_DATE),$9,$10,$11,$12,$13,0,$14,$15,$16)
        RETURNING id`,
       [
-        pid, branchId, invoiceNo, custRows[0]!.id, orderId, input.isCreditNote,
+        pid, branchId, invoiceNo, custRows[0]!.id, orderId, input.isCreditNote, referencedInvoiceId,
         input.issueDate ?? null, input.dueDate ?? null, input.currency,
         subtotal, tax, total, status, input.notes ?? null, userId,
       ],
@@ -390,8 +425,8 @@ export async function createInvoice(
 
 export async function updateInvoice(run: Run, publicIdArg: string, input: UpdateInvoiceInput): Promise<InvoiceRow> {
   return run(async (sql) => {
-    const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_credit_note: boolean }>(
-      "SELECT id, branch_id, is_credit_note FROM invoices WHERE public_id = $1",
+    const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_credit_note: boolean; customer_id: string }>(
+      "SELECT id, branch_id, is_credit_note, customer_id FROM invoices WHERE public_id = $1",
       [publicIdArg],
     );
     if (!existing[0]) throw new FinanceError(404, "Invoice not found");
@@ -417,6 +452,24 @@ export async function updateInvoice(run: Run, publicIdArg: string, input: Update
 
     const isCreditNote = input.isCreditNote ?? inv.is_credit_note;
     const tax = input.tax ?? 0;
+
+    let referencedInvoiceId: string | null | undefined;
+    if (input.referencedInvoicePublicId !== undefined) {
+      if (input.referencedInvoicePublicId === null) {
+        referencedInvoiceId = null;
+      } else {
+        const { rows: refRows } = await sql.query<{ id: string; customer_id: string; total: string; amount_paid: string }>(
+          "SELECT id, customer_id, total, amount_paid FROM invoices WHERE public_id = $1",
+          [input.referencedInvoicePublicId],
+        );
+        if (!refRows[0]) throw new FinanceError(404, "Referenced invoice not found");
+        if (refRows[0].customer_id !== (customerId ?? inv.customer_id)) {
+          throw new FinanceError(400, "Referenced invoice belongs to a different customer");
+        }
+        referencedInvoiceId = refRows[0]!.id;
+      }
+    }
+
     const sets: string[] = [];
     const params: unknown[] = [];
     const push = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
@@ -424,6 +477,7 @@ export async function updateInvoice(run: Run, publicIdArg: string, input: Update
     if (customerId !== undefined) push("customer_id", customerId);
     if (orderId !== undefined) push("order_id", orderId);
     if (input.isCreditNote !== undefined) push("is_credit_note", input.isCreditNote);
+    if (referencedInvoiceId !== undefined) push("referenced_invoice_id", referencedInvoiceId);
     if (input.issueDate !== undefined) push("issue_date", input.issueDate);
     if (input.dueDate !== undefined) push("due_date", input.dueDate);
     if (input.currency !== undefined) push("currency", input.currency);
@@ -793,7 +847,7 @@ function mapPayment(r: Record<string, unknown>): PaymentRow {
 
 export async function listPayments(
   run: Run,
-  opts: { direction?: string; from?: string; to?: string } = {},
+  opts: { direction?: string; from?: string; to?: string; customerPublicId?: string } = {},
 ): Promise<PaymentRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
@@ -801,6 +855,7 @@ export async function listPayments(
     if (opts.direction) { params.push(opts.direction); conds.push(`p.direction = $${params.length}`); }
     if (opts.from) { params.push(opts.from); conds.push(`p.paid_on >= $${params.length}`); }
     if (opts.to) { params.push(opts.to); conds.push(`p.paid_on <= $${params.length}`); }
+    if (opts.customerPublicId) { params.push(opts.customerPublicId); conds.push(`cu.public_id = $${params.length}`); }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const { rows } = await sql.query(
       `SELECT ${PAYMENT_FIELDS} FROM payments p
@@ -1089,9 +1144,16 @@ export async function getCustomerLedger(run: Run, customerPublicId: string): Pro
 
     const { rows } = await sql.query(
       `SELECT i.issue_date AS dt, i.invoice_no AS ref,
-              COALESCE(NULLIF(i.notes,''), 'Invoice ' || i.invoice_no) AS descr,
+              CASE
+                WHEN i.is_credit_note AND ri.invoice_no IS NOT NULL
+                  THEN COALESCE(NULLIF(i.notes,''), 'Credit Note — credits ' || ri.invoice_no)
+                WHEN i.is_credit_note
+                  THEN COALESCE(NULLIF(i.notes,''), 'Credit Note (general adjustment, no invoice referenced)')
+                ELSE COALESCE(NULLIF(i.notes,''), 'Invoice ' || i.invoice_no)
+              END AS descr,
               i.total AS debit, 0 AS credit
          FROM invoices i
+         LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
         WHERE i.customer_id = $1 AND i.status <> 'void'
         UNION ALL
        SELECT p.paid_on AS dt, p.reference AS ref,

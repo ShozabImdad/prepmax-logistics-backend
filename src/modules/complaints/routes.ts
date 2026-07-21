@@ -2,7 +2,7 @@
 //
 // Customer routes (/api/portal/complaints) let a logged-in customer file a
 // complaint against one of their own orders and see their history. Staff
-// routes (/api/complaints) are permission-gated (complaints.view / .manage)
+// routes (/api/complaints) are permission-gated (complaints.manage)
 // and scoped by branch RLS beneath req.db, same as orders.
 
 import { Router, type Response } from "express";
@@ -15,6 +15,7 @@ import {
   listComplaintMessages, addComplaintMessage, verifyComplaintOwnership, ComplaintError,
 } from "./queries.js";
 import { createBranchNotification } from "../notifications/service.js";
+import { addSseClient } from "../notifications/sse.js";
 
 function handleComplaintError(err: unknown, res: Response): void {
   if (err instanceof ComplaintError) {
@@ -30,6 +31,35 @@ function param(v: string | string[] | undefined): string {
 
 export const complaintRouter: Router = Router();       // staff: /api/complaints
 export const portalComplaintRouter: Router = Router(); // customer: /api/portal/complaints
+
+// ── CUSTOMER: live stream ────────────────────────────────────────────────────
+// No customer-facing SSE existed before this; staff already has one at
+// /api/notifications/stream (see modules/notifications/routes.ts). This
+// reuses the exact same branch-scoped hub (addSseClient / pushToBranch) —
+// customers and staff on the same branch share one push fan-out, they just
+// connect from different URLs. Mount at GET /api/portal/complaints/stream.
+portalComplaintRouter.get("/stream", requireCustomer, (req, res) => {
+  const cust = req.auth!;
+  if (!isCustomer(cust)) {
+    res.status(403).end();
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  const remove = addSseClient(cust.branchId, cust.customerId, res);
+  const heartbeat = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch { /* closed */ }
+  }, 25_000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    remove();
+  });
+});
 
 // ── CUSTOMER: file a complaint ──────────────────────────────────────────────
 portalComplaintRouter.post(
@@ -90,7 +120,7 @@ portalComplaintRouter.get(
 complaintRouter.get(
   "/",
   requireStaff,
-  requirePermission("complaints.view"),
+  requirePermission("complaints.manage"),
   asyncHandler(async (req, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     const complaints = await listComplaints(req.db!, { status });
@@ -133,7 +163,7 @@ complaintRouter.patch(
 complaintRouter.get(
   "/:publicId/messages",
   requireStaff,
-  requirePermission("complaints.view"),
+  requirePermission("complaints.manage"),
   asyncHandler(async (req, res) => {
     try {
       const messages = await listComplaintMessages(req.db!, param(req.params.publicId));

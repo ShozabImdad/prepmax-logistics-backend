@@ -38,13 +38,10 @@ notificationRouter.get("/stream", requireStaff, (req, res) => {
     res.status(403).end();
     return;
   }
-  // super_admin has no single branch; they subscribe to their own id-less
-  // channel only if they later pick a branch. For now, require a branch.
+  // branch_manager subscribes to their own branch; super_admin (branchId
+  // null) subscribes to all branches — addSseClient/pushToBranch both
+  // understand null as "every branch".
   const branchId = staff.branchId;
-  if (!branchId) {
-    res.status(400).json({ error: "SSE stream is per-branch; super-admin should select a branch context" });
-    return;
-  }
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");

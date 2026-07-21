@@ -38,7 +38,8 @@ export async function publicTrack(trackingCode: string): Promise<PublicTracking 
 
     const { rows } = await client.query(
       `SELECT id, tracking_code, current_status, current_status_text,
-              receiver_city, receiver_country, last_synced_at
+              receiver_city, receiver_country, last_synced_at,
+              estimated_delivery_min, estimated_delivery_max
          FROM orders
         WHERE tracking_code = $1`,
       [trackingCode],
@@ -75,7 +76,12 @@ export async function publicTrack(trackingCode: string): Promise<PublicTracking 
       statusText: redactCarrier(order.current_status_text),
       destinationCity: order.receiver_city,
       destinationCountry: order.receiver_country,
-      estimatedDelivery: null, // not yet captured as a structured field
+      // Not a confirmed date — use the later (safer) end of the working-day
+      // window as the single estimate shown to customers. Unset until the
+      // order is activated (first carrier leg attached).
+      estimatedDelivery: order.estimated_delivery_max
+        ? new Date(order.estimated_delivery_max).toISOString().slice(0, 10)
+        : null,
       lastUpdated: order.last_synced_at,
       pieceCount: pieces.rows[0]?.n ?? 0,
       // Redact carrier branding (DPD/DHL/UPS/... leak in via carriers' own

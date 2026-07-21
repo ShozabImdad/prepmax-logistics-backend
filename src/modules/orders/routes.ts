@@ -83,7 +83,8 @@ orderRouter.get(
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
     const search = typeof req.query.q === "string" ? req.query.q : undefined;
     const createdVia = typeof req.query.createdVia === "string" ? req.query.createdVia : undefined;
-    const orders = await listOrders(req.db!, { status, createdVia, search });
+    const customerPublicId = typeof req.query.customerPublicId === "string" ? req.query.customerPublicId : undefined;
+    const orders = await listOrders(req.db!, { status, createdVia, search, customerPublicId });
     return res.json({ orders });
   }),
 );

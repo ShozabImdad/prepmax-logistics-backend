@@ -5,6 +5,8 @@ import type { Sql } from "../../db/pool.js";
 import { OrderError, attachLegsInTx, insertBoxesAndItems } from "./service.js";
 import type { LegInput, EditOrderInput } from "./schema.js";
 import { redactCarrier } from "../tracking/sanitize.js";
+import { lookupDeliveryRange } from "./delivery-times.js";
+import { addWorkingDays, toDateOnly } from "../../lib/working-days.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -19,9 +21,9 @@ export async function resolveOrderId(run: Run, orderPublicId: string): Promise<s
   });
 }
 
-async function findOrderIdByPublicId(sql: Sql, orderPublicId: string): Promise<{ id: string; branch_id: string; order_status: string; customer_id: string | null } | null> {
-  const { rows } = await sql.query<{ id: string; branch_id: string; order_status: string; customer_id: string | null }>(
-    "SELECT id, branch_id, order_status, customer_id FROM orders WHERE public_id = $1",
+async function findOrderIdByPublicId(sql: Sql, orderPublicId: string): Promise<{ id: string; branch_id: string; order_status: string; customer_id: string | null; service_type: string | null } | null> {
+  const { rows } = await sql.query<{ id: string; branch_id: string; order_status: string; customer_id: string | null; service_type: string | null }>(
+    "SELECT id, branch_id, order_status, customer_id, service_type FROM orders WHERE public_id = $1",
     [orderPublicId],
   );
   return rows[0] ?? null;
@@ -188,11 +190,25 @@ export async function attachLegs(run: Run, orderPublicId: string, legs: LegInput
 
     await attachLegsInTx(sql, order.id, order.branch_id, legs);
 
-    // First leg activates tracking.
+    // First leg activates tracking — this is "scanned into ops" for delivery
+    // estimate purposes: day-zero for the working-day window is today.
     let newStatus = order.order_status;
     let justActivated = false;
     if (order.order_status === "awaiting_carrier") {
-      await sql.query("UPDATE orders SET order_status = 'active' WHERE id = $1", [order.id]);
+      const range = lookupDeliveryRange(order.service_type);
+      if (range) {
+        const today = new Date();
+        const min = toDateOnly(addWorkingDays(today, range.minDays));
+        const max = toDateOnly(addWorkingDays(today, range.maxDays));
+        await sql.query(
+          "UPDATE orders SET order_status = 'active', estimated_delivery_min = $2, estimated_delivery_max = $3 WHERE id = $1",
+          [order.id, min, max],
+        );
+      } else {
+        // No recognised service type/option (legacy or free-text order) —
+        // still activate, just without an estimate.
+        await sql.query("UPDATE orders SET order_status = 'active' WHERE id = $1", [order.id]);
+      }
       newStatus = "active";
       justActivated = true;
     }
@@ -261,13 +277,23 @@ export interface OrderListRow {
  */
 export async function listOrders(
   run: Run,
-  opts: { customerId?: string; status?: string; createdVia?: string; search?: string; limit?: number; offset?: number },
+  opts: { customerId?: string; customerPublicId?: string; status?: string; createdVia?: string; search?: string; limit?: number; offset?: number },
 ): Promise<OrderListRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
-    if (opts.customerId) {
-      params.push(opts.customerId);
+    let customerId = opts.customerId;
+    if (!customerId && opts.customerPublicId) {
+      const { rows: custRows } = await sql.query<{ id: string }>(
+        "SELECT id FROM customers WHERE public_id = $1",
+        [opts.customerPublicId],
+      );
+      // Unknown customer public id — return no rows rather than erroring,
+      // since this is a filter param, not a required resource lookup.
+      customerId = custRows[0]?.id ?? "00000000-0000-0000-0000-000000000000";
+    }
+    if (customerId) {
+      params.push(customerId);
       conds.push(`customer_id = $${params.length}`);
     }
     if (opts.status) {
@@ -425,6 +451,8 @@ export async function getOrderDetail(
       destinationCountry: order.destination_country,
       serviceType: order.service_type,
       serviceLevel: order.service_level,
+      estimatedDeliveryMin: order.estimated_delivery_min,
+      estimatedDeliveryMax: order.estimated_delivery_max,
       contentsNature: order.contents_nature,
       declaredTotal: order.declared_total != null ? Number(order.declared_total) : null,
       declaredCurrency: order.declared_currency,

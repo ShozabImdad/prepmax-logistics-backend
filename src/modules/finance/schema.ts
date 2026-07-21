@@ -41,6 +41,10 @@ export const createInvoiceSchema = z.object({
   customerPublicId: z.string().min(1),
   orderPublicId: z.string().optional(),
   isCreditNote: z.boolean().default(false),
+  // Only meaningful when isCreditNote is true — the invoice this credit note
+  // corrects. Optional even then: some credit notes are general goodwill
+  // adjustments not tied to one specific invoice.
+  referencedInvoicePublicId: z.string().optional(),
   issueDate: z.string().optional(),                  // ISO date YYYY-MM-DD
   dueDate: z.string().optional(),
   currency: z.string().max(3).default("PKR"),
@@ -55,6 +59,7 @@ export const updateInvoiceSchema = z.object({
   customerPublicId: z.string().optional(),
   orderPublicId: z.string().optional().nullable(),
   isCreditNote: z.boolean().optional(),
+  referencedInvoicePublicId: z.string().optional().nullable(),
   issueDate: z.string().optional(),
   dueDate: z.string().optional().nullable(),
   currency: z.string().max(3).optional(),

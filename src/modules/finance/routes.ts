@@ -1,5 +1,5 @@
 // Finance routes — all staff-only, branch-scoped via req.db (RLS).
-// Mounted at /api/finance. GET routes require finance.view; writes require
+// Mounted at /api/finance. All routes (read and write) require
 // finance.manage. Mirrors the auth-gating pattern from quotes/complaints.
 //
 // Layout:
@@ -98,7 +98,7 @@ async function resolveBranchId(
 // ── Dashboard ───────────────────────────────────────────────────────────────
 financeRouter.get(
   "/dashboard",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const from = str(req.query.from);
     const to = str(req.query.to);
@@ -110,7 +110,7 @@ financeRouter.get(
 // ── Vendors ─────────────────────────────────────────────────────────────────
 financeRouter.get(
   "/vendors",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const activeOnly = req.query.activeOnly === "true";
     const q = str(req.query.q);
@@ -172,7 +172,7 @@ financeRouter.delete(
 
 financeRouter.get(
   "/vendors/:publicId/ledger",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     try {
       const ledger = await getVendorLedger(req.db!, param(req.params.publicId));
@@ -186,7 +186,7 @@ financeRouter.get(
 // ── Invoices (AR) ───────────────────────────────────────────────────────────
 financeRouter.get(
   "/invoices",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const status = str(req.query.status);
     const q = str(req.query.q);
@@ -198,7 +198,7 @@ financeRouter.get(
 
 financeRouter.get(
   "/invoices/:publicId",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     try {
       const invoice = await getInvoice(req.db!, param(req.params.publicId));
@@ -262,7 +262,7 @@ financeRouter.delete(
 // ── Customer Ledger (AR) ────────────────────────────────────────────────────
 financeRouter.get(
   "/customers/:publicId/ledger",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     try {
       const ledger = await getCustomerLedger(req.db!, param(req.params.publicId));
@@ -276,7 +276,7 @@ financeRouter.get(
 // ── Vendor Bills (AP) ───────────────────────────────────────────────────────
 financeRouter.get(
   "/vendor-bills",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const status = str(req.query.status);
     const q = str(req.query.q);
@@ -288,7 +288,7 @@ financeRouter.get(
 
 financeRouter.get(
   "/vendor-bills/:publicId",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     try {
       const bill = await getVendorBill(req.db!, param(req.params.publicId));
@@ -352,7 +352,7 @@ financeRouter.delete(
 // ── Payments ────────────────────────────────────────────────────────────────
 financeRouter.get(
   "/payments",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const direction = str(req.query.direction);
     const from = str(req.query.from);
@@ -398,7 +398,7 @@ financeRouter.delete(
 // ── Expenses ────────────────────────────────────────────────────────────────
 financeRouter.get(
   "/expenses",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const category = str(req.query.category);
     const from = str(req.query.from);
@@ -461,7 +461,7 @@ financeRouter.delete(
 // ── Reports ─────────────────────────────────────────────────────────────────
 financeRouter.get(
   "/reports",
-  requireStaff, requirePermission("finance.view"),
+  requireStaff, requirePermission("finance.manage"),
   asyncHandler(async (req, res) => {
     const periodParsed = reportPeriodSchema.safeParse(req.query.period ?? "monthly");
     if (!periodParsed.success) {

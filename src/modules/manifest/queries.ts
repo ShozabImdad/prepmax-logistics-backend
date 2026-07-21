@@ -28,6 +28,7 @@ function n(v: unknown): number {
 export interface ManifestRow {
   publicId: string;
   manifestNo: string;
+  branchPublicId: string;
   vendorPublicId: string | null;
   vendorName: string | null;
   manifestDate: string;
@@ -41,15 +42,24 @@ export interface ManifestRow {
 }
 
 const MANIFEST_FIELDS = `
-  m.public_id, m.manifest_no, v.public_id AS vendor_public_id, v.name AS vendor_name,
+  m.public_id, m.manifest_no, br.public_id AS branch_public_id,
+  v.public_id AS vendor_public_id, v.name AS vendor_name,
   m.manifest_date, m.status, m.total_shipments, m.total_weight_kg, m.notes,
   m.created_at, m.updated_at, m.dispatched_at
+`;
+
+// Every query selecting MANIFEST_FIELDS must join branches AS br and
+// LEFT JOIN vendors AS v — both aliases are referenced above.
+const MANIFEST_JOINS = `
+  JOIN branches br ON br.id = m.branch_id
+  LEFT JOIN vendors v ON v.id = m.vendor_id
 `;
 
 function mapManifest(r: Record<string, unknown>): ManifestRow {
   return {
     publicId: r.public_id as string,
     manifestNo: r.manifest_no as string,
+    branchPublicId: r.branch_public_id as string,
     vendorPublicId: (r.vendor_public_id as string | null) ?? null,
     vendorName: (r.vendor_name as string | null) ?? null,
     manifestDate: r.manifest_date as string,
@@ -154,7 +164,7 @@ export async function listManifests(run: Run, opts: ListManifestsQuery = {}): Pr
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const { rows } = await sql.query(
       `SELECT ${MANIFEST_FIELDS} FROM manifests m
-         LEFT JOIN vendors v ON v.id = m.vendor_id
+         ${MANIFEST_JOINS}
          ${where}
         ORDER BY m.manifest_date DESC, m.created_at DESC
         LIMIT 300`,
@@ -171,13 +181,16 @@ async function fetchManifestBySql(
 ): Promise<ManifestRow & { shipments: ManifestShipmentRow[] }> {
   const { rows } = await sql.query(
     `SELECT ${MANIFEST_FIELDS} FROM manifests m
-       LEFT JOIN vendors v ON v.id = m.vendor_id
+       ${MANIFEST_JOINS}
       WHERE m.public_id = $1`,
     [publicIdArg],
   );
   if (!rows[0]) throw new ManifestError(404, "Manifest not found");
   const manifest = mapManifest(rows[0]!);
 
+  // No branches join needed here — SHIPMENT_FIELDS only references o
+  // (orders) and b (boxes); the manifest's branch already came from the
+  // header query above.
   const { rows: shipRows } = await sql.query(
     `SELECT ${SHIPMENT_FIELDS} FROM manifest_shipments ms
        JOIN orders o ON o.id = ms.order_id
@@ -236,9 +249,13 @@ export async function updateManifest(
 
     let vendorId: string | null | undefined;
     if (input.vendorPublicId !== undefined) {
-      const { rows } = await sql.query<{ id: string }>("SELECT id FROM vendors WHERE public_id = $1", [input.vendorPublicId]);
-      if (!rows[0]) throw new ManifestError(404, "Vendor not found");
-      vendorId = rows[0]!.id;
+      if (input.vendorPublicId === null) {
+       vendorId = null;
+     } else {
+       const { rows } = await sql.query<{ id: string }>("SELECT id FROM vendors WHERE public_id = $1", [input.vendorPublicId]);
+       if (!rows[0]) throw new ManifestError(404, "Vendor not found");
+       vendorId = rows[0]!.id;
+     }
     }
 
     const sets: string[] = [];
@@ -377,6 +394,10 @@ export async function dispatchManifest(
 }
 
 // ── Search orders eligible to add (tracking-number search box) ─────────────
+// q is optional: an empty/omitted q lists all eligible orders in the given
+// branch (used by the frontend combobox's default "browse" view). A
+// non-empty q narrows that list by tracking_code — same code path handles
+// typed search, barcode-scanned lookups, and the initial branch listing.
 export interface EligibleOrderRow {
   publicId: string;
   trackingCode: string;
@@ -387,25 +408,35 @@ export interface EligibleOrderRow {
 
 export async function searchEligibleOrders(
   run: Run,
-  opts: { q: string; branchPublicId?: string },
+  opts: { q?: string; branchPublicId?: string },
 ): Promise<EligibleOrderRow[]> {
   return run(async (sql) => {
-    const conds: string[] = ["o.tracking_code ILIKE $1"];
-    const params: unknown[] = [`%${opts.q}%`];
+    // Always excludes orders already on a live (non-dispatched) manifest —
+    // this is the base condition regardless of whether q/branch filters apply.
+    const conds: string[] = [
+      `NOT EXISTS (
+         SELECT 1 FROM manifest_shipments ms
+           JOIN manifests m ON m.id = ms.manifest_id
+          WHERE ms.order_id = o.id AND m.status <> 'dispatched'
+       )`,
+    ];
+    const params: unknown[] = [];
+
+    const q = opts.q?.trim();
+    if (q) {
+      params.push(`%${q}%`);
+      conds.push(`o.tracking_code ILIKE $${params.length}`);
+    }
     if (opts.branchPublicId) {
       params.push(opts.branchPublicId);
       conds.push(`o.branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
     }
+
     const { rows } = await sql.query(
       `SELECT o.public_id, o.tracking_code, o.receiver_name, o.receiver_city, o.receiver_country,
               COALESCE((SELECT SUM(b.chargeable_kg) FROM boxes b WHERE b.order_id = o.id), 0) AS weight_kg
          FROM orders o
         WHERE ${conds.join(" AND ")}
-          AND NOT EXISTS (
-            SELECT 1 FROM manifest_shipments ms
-              JOIN manifests m ON m.id = ms.manifest_id
-             WHERE ms.order_id = o.id AND m.status <> 'dispatched'
-          )
         ORDER BY o.created_at DESC
         LIMIT 30`,
       params,
