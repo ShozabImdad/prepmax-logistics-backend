@@ -5,6 +5,7 @@ import { skynetAdapter } from "./skynet.js";
 import { dhlAdapter } from "./dhl.js";
 import { upsAdapter } from "./ups.js";
 import { fedexAdapter } from "./fedex.js";
+import { pakpostAdapter } from "./pakpost.js";
 
 // Registry keyed by the carrier value stored on shipment_legs.carrier.
 export const adapters: Record<string, CarrierAdapter> = {
@@ -14,6 +15,7 @@ export const adapters: Record<string, CarrierAdapter> = {
   dhl: dhlAdapter,
   ups: upsAdapter,
   fedex: fedexAdapter,
+  pakpost: pakpostAdapter,
 };
 
 // Convenience aliases so the CLI accepts friendlier names too.
@@ -21,6 +23,9 @@ export const aliases: Record<string, string> = {
   apx: "smartcargo-apx",
   smartcargo: "smartcargo-apx",
   skynet: "snwwe",
+  "pakistan-post": "pakpost",
+  pakistanpost: "pakpost",
+  "pak-post": "pakpost",
 };
 
 export function resolveAdapter(name: string): CarrierAdapter | null {
