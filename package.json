@@ -26,6 +26,7 @@
     "patchright": "^1.61.1",
     "pg": "^8.13.1",
     "uuidv7": "^1.0.2",
+    "xlsx": "^0.18.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {

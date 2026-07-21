@@ -13,7 +13,7 @@ import { htmlToPdf } from "../documents/pdf.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-
+import * as XLSX from "xlsx";
 // ============================================================================
 // LOGO PRE-LOADING — identical approach to documents/templates.js, kept as
 // its own copy here since the two modules don't share a template layer.
@@ -191,4 +191,49 @@ export function manifestShipmentsCsv(m: ManifestRow & { shipments: ManifestShipm
     );
   }
   return lines.join("\r\n");
+}
+
+export function manifestShipmentsExcel(m: ManifestRow & { shipments: ManifestShipmentRow[] }): Buffer {
+  const header = [
+    "Tracking Code", "Sender", "Receiver", "Destination",
+    "Weight (kg)", "Charges", "Currency", "Order Status",
+  ];
+  const rows = m.shipments.map((s) => [
+    s.trackingCode,
+    s.senderName ?? "",
+    s.receiverName ?? "",
+    s.destination ?? "",
+    Number(s.weightKg.toFixed(2)),
+    Number(s.charges.toFixed(2)),
+    s.currency,
+    s.orderStatus,
+  ]);
+
+  const sheetData = [header, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // reasonable column widths, mirrors the CSV column order
+  ws["!cols"] = [
+    { wch: 16 }, { wch: 20 }, { wch: 20 }, { wch: 22 },
+    { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 14 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Shipments");
+
+  // small summary sheet — mirrors the PDF header block
+  const summary = [
+    ["Manifest No", m.manifestNo],
+    ["Manifest Date", m.manifestDate],
+    ["Vendor / Carrier", m.vendorName ?? "—"],
+    ["Status", m.status],
+    ["Total Shipments", m.totalShipments],
+    ["Total Weight (kg)", m.totalWeightKg],
+    ["Dispatched At", m.dispatchedAt ?? "—"],
+  ];
+  const summaryWs = XLSX.utils.aoa_to_sheet(summary);
+  summaryWs["!cols"] = [{ wch: 18 }, { wch: 24 }];
+  XLSX.utils.book_append_sheet(wb, summaryWs, "Summary");
+
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
 }

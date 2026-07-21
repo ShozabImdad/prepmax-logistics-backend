@@ -371,6 +371,13 @@ export async function closeManifest(
     return fetchManifestBySql(sql, publicIdArg);
   });
 }
+// ── Delete (hard delete, any status — cascades to manifest_shipments) ──────
+export async function deleteManifest(run: Run, publicIdArg: string): Promise<void> {
+  await run(async (sql) => {
+    const { rowCount } = await sql.query("DELETE FROM manifests WHERE public_id = $1", [publicIdArg]);
+    if (!rowCount) throw new ManifestError(404, "Manifest not found");
+  });
+}
 
 // ── Dispatch (final handover to carrier; closed → dispatched) ──────────────
 export async function dispatchManifest(
@@ -413,12 +420,13 @@ export async function searchEligibleOrders(
   return run(async (sql) => {
     // Always excludes orders already on a live (non-dispatched) manifest —
     // this is the base condition regardless of whether q/branch filters apply.
-    const conds: string[] = [
+   const conds: string[] = [
       `NOT EXISTS (
          SELECT 1 FROM manifest_shipments ms
            JOIN manifests m ON m.id = ms.manifest_id
           WHERE ms.order_id = o.id AND m.status <> 'dispatched'
        )`,
+      `o.order_status IN ('awaiting_carrier', 'active')`,
     ];
     const params: unknown[] = [];
 
