@@ -108,6 +108,24 @@ export const updateVendorBillSchema = z.object({
 });
 export type UpdateVendorBillInput = z.infer<typeof updateVendorBillSchema>;
 
+// ── Bank Accounts (cash + named bank accounts) ──────────────────────────────
+export const bankAccountTypeSchema = z.enum(["cash", "bank"]);
+export type BankAccountType = z.infer<typeof bankAccountTypeSchema>;
+
+export const createBankAccountSchema = z.object({
+  branchPublicId: z.string().optional(),  // required for super_admin
+  name: z.string().min(1, "Name is required").max(200),
+  accountType: bankAccountTypeSchema.default("bank"),
+  bankName: z.string().max(200).optional(),
+  accountNumber: z.string().max(100).optional(),
+  openingBalance: z.number().default(0),
+  isActive: z.boolean().default(true),
+});
+export type CreateBankAccountInput = z.infer<typeof createBankAccountSchema>;
+
+export const updateBankAccountSchema = createBankAccountSchema.partial();
+export type UpdateBankAccountInput = z.infer<typeof updateBankAccountSchema>;
+
 // ── Payments ───────────────────────────────────────────────────────────────
 export const paymentDirectionSchema = z.enum(["in", "out"]);
 export const paymentMethodSchema = z.enum(["cash", "bank", "cheque", "online", "other"]);
@@ -118,6 +136,10 @@ export const createPaymentSchema = z.object({
   direction: paymentDirectionSchema,
   method: paymentMethodSchema.default("cash"),
   account: paymentAccountSchema.default("cash_in_hand"),
+  // Optional: point at a specific named bank account (e.g. "Meezan Bank").
+  // When provided, this takes precedence and `account` is derived from it
+  // so the legacy text column and the specific account never disagree.
+  bankAccountPublicId: z.string().optional(),
   amount: z.number().positive("Amount must be > 0"),
   paidOn: z.string().optional(),                       // ISO date
   customerPublicId: z.string().optional(),
@@ -143,6 +165,8 @@ export const createExpenseSchema = z.object({
   category: expenseCategorySchema,
   amount: z.number().positive("Amount must be > 0"),
   account: paymentAccountSchema.default("cash_in_hand"),
+  // Same precedence rule as payments — see createPaymentSchema.
+  bankAccountPublicId: z.string().optional(),
   spentOn: z.string().optional(),
   payee: z.string().max(200).optional(),
   description: z.string().max(2000).optional(),

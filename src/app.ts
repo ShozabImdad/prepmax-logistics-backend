@@ -19,6 +19,7 @@ import { complaintRouter, portalComplaintRouter } from "./modules/complaints/rou
 import { financeRouter } from "./modules/finance/routes.js";
 import { portalFinanceRouter } from "./modules/finance/portal-routes.js";
 import { manifestRouter } from "./modules/manifest/routes.js";
+import { portalManifestRouter } from "./modules/manifest/portal-routes.js";
 import { deManifestRouter } from "./modules/de-manifests/routes.js";
 import { quoteRouter, portalQuoteRouter } from "./modules/quotes/routes.js";
 import { contactsRouter, portalContactsRouter } from "./modules/contacts/routes.js";
@@ -55,6 +56,7 @@ export function createApp() {
   app.use("/api/finance", financeRouter);
   app.use("/api/portal/finance", portalFinanceRouter);
   app.use("/api/manifests", manifestRouter);
+  app.use("/api/portal/manifests", portalManifestRouter);
   app.use("/api/de-manifests", deManifestRouter);
   app.use("/api/portal/complaints", portalComplaintRouter);
   app.use("/api/quotes", quoteRouter);

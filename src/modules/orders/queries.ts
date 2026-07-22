@@ -7,6 +7,7 @@ import type { LegInput, EditOrderInput } from "./schema.js";
 import { redactCarrier } from "../tracking/sanitize.js";
 import { lookupDeliveryRange } from "./delivery-times.js";
 import { addWorkingDays, toDateOnly } from "../../lib/working-days.js";
+import { recomputeTotals } from "../manifest/queries.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -62,31 +63,30 @@ export async function cancelOrder(run: Run, orderPublicId: string): Promise<void
  * Permanently delete an order. Boxes, box_items, shipment_legs, and
  * tracking_events all ON DELETE CASCADE from orders, so this one statement
  * removes the whole order graph. Runs in the branch context (RLS applies).
+ *
+ * manifest_shipments.order_id is ON DELETE RESTRICT — an order sitting on a
+ * manifest (open, closed, or dispatched) can't be deleted while that link
+ * exists. Rather than blocking the whole delete, we unlink the order from
+ * every manifest it's on first (and recompute each affected manifest's
+ * cached totals), then delete the order itself. This preserves the
+ * manifest header/history (manifest_no, status, dates, etc.) — only the
+ * row connecting it to this specific order is removed.
  */
 export async function deleteOrder(run: Run, orderPublicId: string): Promise<void> {
   await run(async (sql) => {
     const order = await findOrderIdByPublicId(sql, orderPublicId);
     if (!order) throw new OrderError(404, "Order not found");
 
-    // manifest_shipments.order_id is ON DELETE RESTRICT — an order sitting
-    // on any manifest (open, closed, or dispatched) can't be deleted until
-    // it's taken off. Check first and give a clear, actionable error
-    // instead of letting the raw FK violation surface to the user.
-    const { rows: onManifest } = await sql.query<{ manifest_no: string; status: string }>(
-      `SELECT m.manifest_no, m.status
-         FROM manifest_shipments ms
-         JOIN manifests m ON m.id = ms.manifest_id
-        WHERE ms.order_id = $1`,
+    const { rows: onManifests } = await sql.query<{ manifest_id: string }>(
+      `SELECT DISTINCT manifest_id FROM manifest_shipments WHERE order_id = $1`,
       [order.id],
     );
-    if (onManifest[0]) {
-      const { manifest_no, status } = onManifest[0];
-      throw new OrderError(
-        409,
-        status === "open"
-          ? `This order is on manifest ${manifest_no} — remove it from the manifest before deleting.`
-          : `This order is on manifest ${manifest_no} (${status}) and can't be removed from a non-open manifest. Delete blocked to preserve manifest history.`,
-      );
+
+    if (onManifests.length > 0) {
+      await sql.query("DELETE FROM manifest_shipments WHERE order_id = $1", [order.id]);
+      for (const { manifest_id } of onManifests) {
+        await recomputeTotals(sql, manifest_id);
+      }
     }
 
     await sql.query("DELETE FROM orders WHERE id = $1", [order.id]);
@@ -276,6 +276,60 @@ export async function editLeg(
     // Old events are for the previous number → clear them; next sync refills.
     await sql.query("DELETE FROM tracking_events WHERE shipment_leg_id = $1", [leg.id]);
     return { orderId: order.id, branchId: order.branch_id, cleared: true };
+  });
+}
+
+/**
+ * Permanently remove a carrier leg from an order. super_admin only (enforced
+ * at the route level) — this is a corrective/cleanup action, not a normal
+ * staff operation, since it can undo tracking activation.
+ *
+ * tracking_events.shipment_leg_id is ON DELETE CASCADE from shipment_legs, so
+ * removing the leg row also removes its fetched tracking history.
+ *
+ * If this was the order's last remaining leg and the order had already been
+ * activated for tracking, the order reverts to 'awaiting_carrier' (no
+ * carrier attached = nothing to track yet) and its estimated delivery
+ * window is cleared, since that estimate was computed off leg attachment.
+ */
+export async function deleteLeg(
+  run: Run,
+  orderPublicId: string,
+  sequence: number,
+): Promise<{ orderId: string; branchId: string; remainingLegs: number; revertedToAwaitingCarrier: boolean }> {
+  return run(async (sql) => {
+    const order = await findOrderIdByPublicId(sql, orderPublicId);
+    if (!order) throw new OrderError(404, "Order not found");
+
+    const legRes = await sql.query<{ id: string }>(
+      "SELECT id FROM shipment_legs WHERE order_id = $1 AND sequence = $2",
+      [order.id, sequence],
+    );
+    const leg = legRes.rows[0];
+    if (!leg) throw new OrderError(404, "Carrier leg not found");
+
+    await sql.query("DELETE FROM shipment_legs WHERE id = $1", [leg.id]);
+
+    const { rows: countRows } = await sql.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM shipment_legs WHERE order_id = $1",
+      [order.id],
+    );
+    const remainingLegs = countRows[0]!.n;
+
+    let revertedToAwaitingCarrier = false;
+    if (remainingLegs === 0 && order.order_status === "active") {
+      await sql.query(
+        `UPDATE orders
+            SET order_status = 'awaiting_carrier',
+                estimated_delivery_min = NULL,
+                estimated_delivery_max = NULL
+          WHERE id = $1`,
+        [order.id],
+      );
+      revertedToAwaitingCarrier = true;
+    }
+
+    return { orderId: order.id, branchId: order.branch_id, remainingLegs, revertedToAwaitingCarrier };
   });
 }
 

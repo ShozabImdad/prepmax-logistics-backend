@@ -23,6 +23,15 @@ export const addShipmentsSchema = z.object({
 });
 export type AddShipmentsInput = z.infer<typeof addShipmentsSchema>;
 
+// ── Customer portal: create/list own manifests ─────────────────────────────
+// No vendorPublicId — always defaults to the branch's house vendor
+// ("Prepmax Logistics"); customers cannot pick or see the real carrier.
+export const createCustomerManifestSchema = z.object({
+  manifestDate: z.string().optional(),
+  notes: z.string().optional(),
+});
+export type CreateCustomerManifestInput = z.infer<typeof createCustomerManifestSchema>;
+
 export const listManifestsQuerySchema = z.object({
   status: manifestStatusEnum.optional(),
   q: z.string().optional(),

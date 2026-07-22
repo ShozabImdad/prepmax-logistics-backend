@@ -14,6 +14,7 @@ import type {
   CreateVendorBillInput, UpdateVendorBillInput, VendorBillItemInput,
   CreatePaymentInput,
   CreateExpenseInput, UpdateExpenseInput,
+  CreateBankAccountInput, UpdateBankAccountInput,
 } from "./schema.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
@@ -26,6 +27,123 @@ export class FinanceError extends Error {
 
 function n(v: unknown): number {
   return v == null ? 0 : Number(v);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BANK ACCOUNTS (cash + named bank accounts — Q7)
+// ═══════════════════════════════════════════════════════════════════════════
+export interface BankAccountRow {
+  publicId: string;
+  name: string;
+  accountType: string;          // 'cash' | 'bank'
+  bankName: string | null;
+  accountNumber: string | null;
+  openingBalance: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+const BANK_ACCOUNT_FIELDS = `
+  ba.public_id, ba.name, ba.account_type, ba.bank_name, ba.account_number,
+  ba.opening_balance, ba.is_active, ba.created_at, ba.updated_at
+`;
+
+function mapBankAccount(r: Record<string, unknown>): BankAccountRow {
+  return {
+    publicId: r.public_id as string,
+    name: r.name as string,
+    accountType: r.account_type as string,
+    bankName: (r.bank_name as string | null) ?? null,
+    accountNumber: (r.account_number as string | null) ?? null,
+    openingBalance: n(r.opening_balance),
+    isActive: r.is_active as boolean,
+    createdAt: r.created_at as string,
+    updatedAt: r.updated_at as string,
+  };
+}
+
+export async function listBankAccounts(
+  run: Run,
+  opts: { activeOnly?: boolean; accountType?: string; branchPublicId?: string } = {},
+): Promise<BankAccountRow[]> {
+  return run(async (sql) => {
+    const conds: string[] = [];
+    const params: unknown[] = [];
+    if (opts.activeOnly) { params.push(true); conds.push(`ba.is_active = $${params.length}`); }
+    if (opts.accountType) { params.push(opts.accountType); conds.push(`ba.account_type = $${params.length}`); }
+    if (opts.branchPublicId) {
+      params.push(opts.branchPublicId);
+      conds.push(`ba.branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
+    }
+    const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    const { rows } = await sql.query(
+      `SELECT ${BANK_ACCOUNT_FIELDS} FROM bank_accounts ba ${where} ORDER BY ba.account_type ASC, ba.name ASC`,
+      params,
+    );
+    return rows.map(mapBankAccount);
+  });
+}
+
+export async function createBankAccount(
+  run: Run,
+  branchId: string,
+  userId: string,
+  input: CreateBankAccountInput,
+): Promise<BankAccountRow> {
+  return run(async (sql) => {
+    const pid = publicId();
+    try {
+      await sql.query(
+        `INSERT INTO bank_accounts
+           (public_id, branch_id, name, account_type, bank_name, account_number,
+            opening_balance, is_active, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [
+          pid, branchId, input.name, input.accountType, input.bankName ?? null,
+          input.accountNumber ?? null, input.openingBalance, input.isActive, userId,
+        ],
+      );
+    } catch (err) {
+      if (err instanceof Error && /unique/i.test(err.message)) {
+        throw new FinanceError(409, "An account with this name already exists for this branch");
+      }
+      throw err;
+    }
+    const { rows } = await sql.query(`SELECT ${BANK_ACCOUNT_FIELDS} FROM bank_accounts ba WHERE ba.public_id = $1`, [pid]);
+    return mapBankAccount(rows[0]!);
+  });
+}
+
+export async function updateBankAccount(run: Run, publicIdArg: string, input: UpdateBankAccountInput): Promise<BankAccountRow> {
+  return run(async (sql) => {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    const push = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
+    if (input.name !== undefined) push("name", input.name);
+    if (input.accountType !== undefined) push("account_type", input.accountType);
+    if (input.bankName !== undefined) push("bank_name", input.bankName);
+    if (input.accountNumber !== undefined) push("account_number", input.accountNumber);
+    if (input.openingBalance !== undefined) push("opening_balance", input.openingBalance);
+    if (input.isActive !== undefined) push("is_active", input.isActive);
+    if (!sets.length) throw new FinanceError(400, "No fields to update");
+    params.push(publicIdArg);
+    const { rowCount } = await sql.query(`UPDATE bank_accounts SET ${sets.join(", ")} WHERE public_id = $${params.length}`, params);
+    if (rowCount === 0) throw new FinanceError(404, "Bank account not found");
+    const { rows } = await sql.query(`SELECT ${BANK_ACCOUNT_FIELDS} FROM bank_accounts ba WHERE ba.public_id = $1`, [publicIdArg]);
+    return mapBankAccount(rows[0]!);
+  });
+}
+
+// Soft-deactivate only — never hard delete a bank account, since payments/
+// expenses reference it (ON DELETE RESTRICT) and it's part of financial
+// history. A deactivated account stops showing up as a selectable option
+// for new payments/expenses but its past records + balance remain intact.
+export async function deleteBankAccount(run: Run, publicIdArg: string): Promise<void> {
+  return run(async (sql) => {
+    const { rowCount } = await sql.query("UPDATE bank_accounts SET is_active = false WHERE public_id = $1", [publicIdArg]);
+    if (rowCount === 0) throw new FinanceError(404, "Bank account not found");
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -799,6 +917,8 @@ export interface PaymentRow {
   direction: string;
   method: string;
   account: string;
+  bankAccountPublicId: string | null;
+  bankAccountName: string | null;
   amount: number;
   paidOn: string;
   customerPublicId: string | null;
@@ -816,6 +936,7 @@ export interface PaymentRow {
 
 const PAYMENT_FIELDS = `
   p.public_id, p.direction, p.method, p.account, p.amount, p.paid_on,
+  ba.public_id AS bank_account_public_id, ba.name AS bank_account_name,
   cu.public_id AS customer_public_id, cu.full_name AS customer_name,
   v.public_id AS vendor_public_id, v.name AS vendor_name,
   i.public_id AS invoice_public_id, i.invoice_no,
@@ -829,6 +950,8 @@ function mapPayment(r: Record<string, unknown>): PaymentRow {
     direction: r.direction as string,
     method: r.method as string,
     account: r.account as string,
+    bankAccountPublicId: (r.bank_account_public_id as string | null) ?? null,
+    bankAccountName: (r.bank_account_name as string | null) ?? null,
     amount: n(r.amount),
     paidOn: r.paid_on as string,
     customerPublicId: (r.customer_public_id as string | null) ?? null,
@@ -863,6 +986,7 @@ export async function listPayments(
          LEFT JOIN vendors    v  ON v.id  = p.vendor_id
          LEFT JOIN invoices   i  ON i.id  = p.invoice_id
          LEFT JOIN vendor_bills vb ON vb.id = p.vendor_bill_id
+         LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
          ${where}
         ORDER BY p.paid_on DESC, p.created_at DESC
         LIMIT 500`,
@@ -884,6 +1008,20 @@ export async function createPayment(
     let vendorId: string | null = null;
     let invoiceId: string | null = null;
     let vendorBillId: string | null = null;
+    let bankAccountId: string | null = null;
+    let account = input.account;
+
+    if (input.bankAccountPublicId) {
+      const { rows } = await sql.query<{ id: string; account_type: string; is_active: boolean }>(
+        "SELECT id, account_type, is_active FROM bank_accounts WHERE public_id = $1",
+        [input.bankAccountPublicId],
+      );
+      if (!rows[0]) throw new FinanceError(404, "Bank account not found");
+      if (!rows[0].is_active) throw new FinanceError(400, "This account is deactivated");
+      bankAccountId = rows[0].id;
+      // Keep the legacy `account` text column consistent with the chosen account.
+      account = rows[0].account_type === "cash" ? "cash_in_hand" : "bank";
+    }
 
     if (input.customerPublicId) {
       const { rows } = await sql.query<{ id: string }>("SELECT id FROM customers WHERE public_id = $1", [input.customerPublicId]);
@@ -923,11 +1061,11 @@ export async function createPayment(
     const pid = publicId();
     await sql.query(
       `INSERT INTO payments
-         (public_id, branch_id, direction, method, account, amount, paid_on,
+         (public_id, branch_id, direction, method, account, bank_account_id, amount, paid_on,
           customer_id, vendor_id, invoice_id, vendor_bill_id, reference, notes, created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,CURRENT_DATE),$8,$9,$10,$11,$12,$13,$14)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,CURRENT_DATE),$9,$10,$11,$12,$13,$14,$15)`,
       [
-        pid, branchId, input.direction, input.method, input.account, input.amount,
+        pid, branchId, input.direction, input.method, account, bankAccountId, input.amount,
         input.paidOn ?? null, customerId, vendorId, invoiceId, vendorBillId,
         input.reference ?? null, input.notes ?? null, userId,
       ],
@@ -966,6 +1104,7 @@ export async function createPayment(
          LEFT JOIN vendors    v  ON v.id  = p.vendor_id
          LEFT JOIN invoices   i  ON i.id  = p.invoice_id
          LEFT JOIN vendor_bills vb ON vb.id = p.vendor_bill_id
+         LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
         WHERE p.public_id = $1`,
       [pid],
     );
@@ -1020,6 +1159,8 @@ export interface ExpenseRow {
   category: string;
   amount: number;
   account: string;
+  bankAccountPublicId: string | null;
+  bankAccountName: string | null;
   spentOn: string;
   payee: string | null;
   description: string | null;
@@ -1029,6 +1170,7 @@ export interface ExpenseRow {
 
 const EXPENSE_FIELDS = `
   e.public_id, e.category, e.amount, e.account, e.spent_on,
+  ba.public_id AS bank_account_public_id, ba.name AS bank_account_name,
   e.payee, e.description, e.reference, e.created_at
 `;
 
@@ -1038,6 +1180,8 @@ function mapExpense(r: Record<string, unknown>): ExpenseRow {
     category: r.category as string,
     amount: n(r.amount),
     account: r.account as string,
+    bankAccountPublicId: (r.bank_account_public_id as string | null) ?? null,
+    bankAccountName: (r.bank_account_name as string | null) ?? null,
     spentOn: r.spent_on as string,
     payee: (r.payee as string | null) ?? null,
     description: (r.description as string | null) ?? null,
@@ -1058,7 +1202,9 @@ export async function listExpenses(
     if (opts.to) { params.push(opts.to); conds.push(`e.spent_on <= $${params.length}`); }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
     const { rows } = await sql.query(
-      `SELECT ${EXPENSE_FIELDS} FROM expenses e ${where} ORDER BY e.spent_on DESC, e.created_at DESC LIMIT 500`,
+      `SELECT ${EXPENSE_FIELDS} FROM expenses e
+         LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id
+         ${where} ORDER BY e.spent_on DESC, e.created_at DESC LIMIT 500`,
       params,
     );
     return rows.map(mapExpense);
@@ -1072,19 +1218,36 @@ export async function createExpense(
   input: CreateExpenseInput,
 ): Promise<ExpenseRow> {
   return run(async (sql) => {
+    let bankAccountId: string | null = null;
+    let account = input.account;
+
+    if (input.bankAccountPublicId) {
+      const { rows } = await sql.query<{ id: string; account_type: string; is_active: boolean }>(
+        "SELECT id, account_type, is_active FROM bank_accounts WHERE public_id = $1",
+        [input.bankAccountPublicId],
+      );
+      if (!rows[0]) throw new FinanceError(404, "Bank account not found");
+      if (!rows[0].is_active) throw new FinanceError(400, "This account is deactivated");
+      bankAccountId = rows[0].id;
+      account = rows[0].account_type === "cash" ? "cash_in_hand" : "bank";
+    }
+
     const pid = publicId();
     await sql.query(
       `INSERT INTO expenses
-         (public_id, branch_id, category, amount, account, spent_on,
+         (public_id, branch_id, category, amount, account, bank_account_id, spent_on,
           payee, description, reference, created_by)
-       VALUES ($1,$2,$3,$4,$5,COALESCE($6,CURRENT_DATE),$7,$8,$9,$10)`,
+       VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7,CURRENT_DATE),$8,$9,$10,$11)`,
       [
-        pid, branchId, input.category, input.amount, input.account,
+        pid, branchId, input.category, input.amount, account, bankAccountId,
         input.spentOn ?? null, input.payee ?? null, input.description ?? null,
         input.reference ?? null, userId,
       ],
     );
-    const { rows } = await sql.query(`SELECT ${EXPENSE_FIELDS} FROM expenses e WHERE e.public_id = $1`, [pid]);
+    const { rows } = await sql.query(
+      `SELECT ${EXPENSE_FIELDS} FROM expenses e LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id WHERE e.public_id = $1`,
+      [pid],
+    );
     return mapExpense(rows[0]!);
   });
 }
@@ -1096,7 +1259,18 @@ export async function updateExpense(run: Run, publicIdArg: string, input: Update
     const push = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
     if (input.category !== undefined) push("category", input.category);
     if (input.amount !== undefined) push("amount", input.amount);
-    if (input.account !== undefined) push("account", input.account);
+    if (input.bankAccountPublicId !== undefined) {
+      const { rows } = await sql.query<{ id: string; account_type: string; is_active: boolean }>(
+        "SELECT id, account_type, is_active FROM bank_accounts WHERE public_id = $1",
+        [input.bankAccountPublicId],
+      );
+      if (!rows[0]) throw new FinanceError(404, "Bank account not found");
+      if (!rows[0].is_active) throw new FinanceError(400, "This account is deactivated");
+      push("bank_account_id", rows[0].id);
+      push("account", rows[0].account_type === "cash" ? "cash_in_hand" : "bank");
+    } else if (input.account !== undefined) {
+      push("account", input.account);
+    }
     if (input.spentOn !== undefined) push("spent_on", input.spentOn);
     if (input.payee !== undefined) push("payee", input.payee);
     if (input.description !== undefined) push("description", input.description);
@@ -1105,7 +1279,10 @@ export async function updateExpense(run: Run, publicIdArg: string, input: Update
     params.push(publicIdArg);
     const { rowCount } = await sql.query(`UPDATE expenses SET ${sets.join(", ")} WHERE public_id = $${params.length}`, params);
     if (rowCount === 0) throw new FinanceError(404, "Expense not found");
-    const { rows } = await sql.query(`SELECT ${EXPENSE_FIELDS} FROM expenses e WHERE e.public_id = $1`, [publicIdArg]);
+    const { rows } = await sql.query(
+      `SELECT ${EXPENSE_FIELDS} FROM expenses e LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id WHERE e.public_id = $1`,
+      [publicIdArg],
+    );
     return mapExpense(rows[0]!);
   });
 }
@@ -1239,7 +1416,18 @@ export async function getVendorLedger(run: Run, vendorPublicId: string): Promise
 // DASHBOARD
 // Total Income (inbound payments) · Total Expenses (outbound payments +
 // operational expenses) · Pending Payments (unpaid+partial invoices total
-// minus amount_paid) · Profit/Loss · Cash in Hand · Bank Balance.
+// minus amount_paid) · Profit/Loss are period-scoped (respect from/to).
+//
+// Cash in Hand / Bank Balance are ALL-TIME running balances — independent of
+// the from/to window — computed as each account's opening_balance plus the
+// full history of payments/expenses ever posted to it. Filtering the
+// dashboard to "this month" must not make Cash in Hand look like it only
+// holds this month's net movement (design-doc Part 2 §C-3 / Part 4 §J.7).
+//
+// Legacy rows recorded before bank_accounts existed (bank_account_id IS
+// NULL) are still counted, matched by their old `account` text
+// ('cash_in_hand' | 'bank'), so historical totals stay correct even for
+// data written before this migration.
 // ═══════════════════════════════════════════════════════════════════════════
 export interface FinanceDashboard {
   totalIncome: number;
@@ -1247,8 +1435,15 @@ export interface FinanceDashboard {
   pendingPayments: number;          // what customers still owe us
   pendingVendorBills: number;       // what we still owe vendors
   profitLoss: number;
-  cashInHand: number;
-  bankBalance: number;
+  cashInHand: number;               // all-time, all cash-type accounts combined
+  bankBalance: number;              // all-time, all bank-type accounts combined
+  bankAccounts: Array<{
+    publicId: string;
+    name: string;
+    accountType: string;
+    openingBalance: number;
+    balance: number;                // all-time running balance for this one account
+  }>;
   invoiceCount: number;
   unpaidInvoiceCount: number;
   vendorBillCount: number;
@@ -1267,12 +1462,31 @@ export async function getFinanceDashboard(run: Run, opts: { from?: string; to?: 
            + COALESCE((SELECT SUM(amount) FROM expenses WHERE spent_on BETWEEN $1 AND $2), 0)::numeric AS total_expenses,
          COALESCE((SELECT SUM(total - amount_paid) FROM invoices WHERE status IN ('unpaid','partial')), 0)::numeric AS pending_ar,
          COALESCE((SELECT SUM(total - amount_paid) FROM vendor_bills WHERE status IN ('unpaid','partial')), 0)::numeric AS pending_ap,
-         COALESCE((SELECT SUM(amount) FROM payments WHERE direction = 'in'  AND account = 'cash_in_hand' AND paid_on BETWEEN $1 AND $2), 0)
-           - COALESCE((SELECT SUM(amount) FROM payments WHERE direction = 'out' AND account = 'cash_in_hand' AND paid_on BETWEEN $1 AND $2), 0)
-           - COALESCE((SELECT SUM(amount) FROM expenses WHERE account = 'cash_in_hand' AND spent_on BETWEEN $1 AND $2), 0)::numeric AS cash_in_hand,
-         COALESCE((SELECT SUM(amount) FROM payments WHERE direction = 'in'  AND account = 'bank' AND paid_on BETWEEN $1 AND $2), 0)
-           - COALESCE((SELECT SUM(amount) FROM payments WHERE direction = 'out' AND account = 'bank' AND paid_on BETWEEN $1 AND $2), 0)
-           - COALESCE((SELECT SUM(amount) FROM expenses WHERE account = 'bank' AND spent_on BETWEEN $1 AND $2), 0)::numeric AS bank_balance,
+
+         -- Cash in Hand: ALL-TIME, opening balances + full history, no date filter.
+         COALESCE((SELECT SUM(opening_balance) FROM bank_accounts WHERE account_type = 'cash'), 0)
+           + COALESCE((SELECT SUM(p.amount) FROM payments p LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
+                        WHERE p.direction = 'in'
+                          AND (ba.account_type = 'cash' OR (p.bank_account_id IS NULL AND p.account = 'cash_in_hand'))), 0)
+           - COALESCE((SELECT SUM(p.amount) FROM payments p LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
+                        WHERE p.direction = 'out'
+                          AND (ba.account_type = 'cash' OR (p.bank_account_id IS NULL AND p.account = 'cash_in_hand'))), 0)
+           - COALESCE((SELECT SUM(e.amount) FROM expenses e LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id
+                        WHERE (ba.account_type = 'cash' OR (e.bank_account_id IS NULL AND e.account = 'cash_in_hand'))), 0)
+           AS cash_in_hand,
+
+         -- Bank Balance: ALL-TIME, sum across every named bank account, no date filter.
+         COALESCE((SELECT SUM(opening_balance) FROM bank_accounts WHERE account_type = 'bank'), 0)
+           + COALESCE((SELECT SUM(p.amount) FROM payments p LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
+                        WHERE p.direction = 'in'
+                          AND (ba.account_type = 'bank' OR (p.bank_account_id IS NULL AND p.account = 'bank'))), 0)
+           - COALESCE((SELECT SUM(p.amount) FROM payments p LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
+                        WHERE p.direction = 'out'
+                          AND (ba.account_type = 'bank' OR (p.bank_account_id IS NULL AND p.account = 'bank'))), 0)
+           - COALESCE((SELECT SUM(e.amount) FROM expenses e LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id
+                        WHERE (ba.account_type = 'bank' OR (e.bank_account_id IS NULL AND e.account = 'bank'))), 0)
+           AS bank_balance,
+
          (SELECT COUNT(*)::int FROM invoices)::int AS invoice_count,
          (SELECT COUNT(*)::int FROM invoices WHERE status IN ('unpaid','partial'))::int AS unpaid_invoice_count,
          (SELECT COUNT(*)::int FROM vendor_bills)::int AS vendor_bill_count,
@@ -1282,6 +1496,26 @@ export async function getFinanceDashboard(run: Run, opts: { from?: string; to?: 
     const r = rows[0]!;
     const totalIncome = n(r.total_income);
     const totalExpenses = n(r.total_expenses);
+
+    // Per-account breakdown — exact linked balance for each named account
+    // (opening balance + only the payments/expenses explicitly posted to
+    // it). Legacy unlinked rows aren't attributable to one specific
+    // account, so they aren't part of this per-account list, but they are
+    // still included in the combined cash_in_hand / bank_balance totals
+    // above.
+    const { rows: acctRows } = await sql.query(
+      `SELECT
+         ba.public_id, ba.name, ba.account_type, ba.opening_balance,
+         ba.opening_balance
+           + COALESCE((SELECT SUM(amount) FROM payments WHERE bank_account_id = ba.id AND direction = 'in'), 0)
+           - COALESCE((SELECT SUM(amount) FROM payments WHERE bank_account_id = ba.id AND direction = 'out'), 0)
+           - COALESCE((SELECT SUM(amount) FROM expenses WHERE bank_account_id = ba.id), 0)
+           AS balance
+       FROM bank_accounts ba
+       WHERE ba.is_active = true
+       ORDER BY ba.account_type ASC, ba.name ASC`,
+    );
+
     return {
       totalIncome,
       totalExpenses,
@@ -1290,6 +1524,13 @@ export async function getFinanceDashboard(run: Run, opts: { from?: string; to?: 
       profitLoss: totalIncome - totalExpenses,
       cashInHand: n(r.cash_in_hand),
       bankBalance: n(r.bank_balance),
+      bankAccounts: acctRows.map((a) => ({
+        publicId: a.public_id as string,
+        name: a.name as string,
+        accountType: a.account_type as string,
+        openingBalance: n(a.opening_balance),
+        balance: n(a.balance),
+      })),
       invoiceCount: r.invoice_count as number,
       unpaidInvoiceCount: r.unpaid_invoice_count as number,
       vendorBillCount: r.vendor_bill_count as number,

@@ -8,7 +8,9 @@
 
 import type { Sql } from "../../db/pool.js";
 import { publicId } from "../../lib/ids.js";
-import type { CreateManifestInput, UpdateManifestInput, ListManifestsQuery } from "./schema.js";
+import type {
+  CreateManifestInput, UpdateManifestInput, ListManifestsQuery, CreateCustomerManifestInput,
+} from "./schema.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -39,13 +41,15 @@ export interface ManifestRow {
   createdAt: string;
   updatedAt: string;
   dispatchedAt: string | null;
+  createdByCustomer: boolean; // true when a customer created this via the portal (§G)
 }
 
 const MANIFEST_FIELDS = `
   m.public_id, m.manifest_no, br.public_id AS branch_public_id,
   v.public_id AS vendor_public_id, v.name AS vendor_name,
   m.manifest_date, m.status, m.total_shipments, m.total_weight_kg, m.notes,
-  m.created_at, m.updated_at, m.dispatched_at
+  m.created_at, m.updated_at, m.dispatched_at,
+  (m.created_by_customer_id IS NOT NULL) AS created_by_customer
 `;
 
 // Every query selecting MANIFEST_FIELDS must join branches AS br and
@@ -70,6 +74,7 @@ function mapManifest(r: Record<string, unknown>): ManifestRow {
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string,
     dispatchedAt: (r.dispatched_at as string | null) ?? null,
+    createdByCustomer: Boolean(r.created_by_customer),
   };
 }
 
@@ -132,7 +137,9 @@ async function nextManifestNo(sql: Sql, branchId: string): Promise<string> {
 
 // Recompute + persist cached totals from the current shipment set. Call
 // after every add/remove, inside the same transaction.
-async function recomputeTotals(sql: Sql, manifestId: string): Promise<void> {
+// Exported so other modules (e.g. orders — hard delete) can keep a
+// manifest's cached totals correct after unlinking a shipment from it.
+export async function recomputeTotals(sql: Sql, manifestId: string): Promise<void> {
   await sql.query(
     `UPDATE manifests SET
        total_shipments = (SELECT COUNT(*) FROM manifest_shipments WHERE manifest_id = $1),
@@ -438,6 +445,206 @@ export async function searchEligibleOrders(
     if (opts.branchPublicId) {
       params.push(opts.branchPublicId);
       conds.push(`o.branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
+    }
+
+    const { rows } = await sql.query(
+      `SELECT o.public_id, o.tracking_code, o.receiver_name, o.receiver_city, o.receiver_country,
+              COALESCE((SELECT SUM(b.chargeable_kg) FROM boxes b WHERE b.order_id = o.id), 0) AS weight_kg
+         FROM orders o
+        WHERE ${conds.join(" AND ")}
+        ORDER BY o.created_at DESC
+        LIMIT 30`,
+      params,
+    );
+    return rows.map((r) => ({
+      publicId: r.public_id as string,
+      trackingCode: r.tracking_code as string,
+      receiverName: (r.receiver_name as string | null) ?? null,
+      destination: [r.receiver_city, r.receiver_country].filter(Boolean).join(", ") || null,
+      weightKg: n(r.weight_kg),
+    }));
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CUSTOMER PORTAL — §G of ACCOUNTS_MANIFEST_DESIGN.md.
+// A customer can create a manifest for their own orders; it's always
+// stamped with the branch's house vendor ("Prepmax Logistics") and the
+// customer can never see or choose a real carrier. Staff re-assign the
+// real carrier later via the existing PATCH /api/manifests/:publicId —
+// no new staff endpoint needed for that.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Resolve the branch's house vendor (seeded by migration 0027). Throws if
+// somehow missing so a customer manifest never silently ends up with a
+// null/real vendor.
+async function getHouseVendorId(sql: Sql, branchId: string): Promise<string> {
+  const { rows } = await sql.query<{ id: string }>(
+    "SELECT id FROM vendors WHERE branch_id = $1 AND is_house_vendor LIMIT 1",
+    [branchId],
+  );
+  if (!rows[0]) throw new ManifestError(500, "House vendor not configured for this branch");
+  return rows[0]!.id;
+}
+
+// ── Create (customer) ───────────────────────────────────────────────────────
+export async function createCustomerManifest(
+  run: Run,
+  branchId: string,
+  customerId: string,
+  input: CreateCustomerManifestInput,
+): Promise<ManifestRow & { shipments: ManifestShipmentRow[] }> {
+  return run(async (sql) => {
+    const vendorId = await getHouseVendorId(sql, branchId);
+    const manifestNo = await nextManifestNo(sql, branchId);
+    const pid = publicId();
+    await sql.query(
+      `INSERT INTO manifests
+         (public_id, branch_id, manifest_no, vendor_id, manifest_date, notes, created_by_customer_id)
+       VALUES ($1,$2,$3,$4,COALESCE($5,CURRENT_DATE),$6,$7)`,
+      [pid, branchId, manifestNo, vendorId, input.manifestDate ?? null, input.notes ?? null, customerId],
+    );
+    return fetchManifestBySql(sql, pid);
+  });
+}
+
+// ── List own manifests ──────────────────────────────────────────────────────
+export async function listCustomerManifests(run: Run, customerId: string): Promise<ManifestRow[]> {
+  return run(async (sql) => {
+    const { rows } = await sql.query(
+      `SELECT ${MANIFEST_FIELDS} FROM manifests m
+         ${MANIFEST_JOINS}
+        WHERE m.created_by_customer_id = $1
+        ORDER BY m.created_at DESC
+        LIMIT 300`,
+      [customerId],
+    );
+    return rows.map(mapManifest);
+  });
+}
+
+// ── Ownership check — 404s (not 403) on someone else's manifest, same as
+// verifyQuoteOwnership / the portal finance invoice check, so existence
+// of another customer's manifest is never leaked. ─────────────────────────
+export async function verifyManifestOwnership(
+  run: Run,
+  publicIdArg: string,
+  customerId: string,
+): Promise<void> {
+  await run(async (sql) => {
+    const { rows } = await sql.query<{ id: string }>(
+      "SELECT id FROM manifests WHERE public_id = $1 AND created_by_customer_id = $2",
+      [publicIdArg, customerId],
+    );
+    if (!rows[0]) throw new ManifestError(404, "Manifest not found");
+  });
+}
+
+// ── Add shipments (customer) — same as addShipments (incl. the cross-
+// manifest duplicate check, G-Q2), plus an ownership check that every order
+// being added actually belongs to this customer. Both checks and the
+// actual insert run inside ONE transaction (single `run` call) so there's
+// no gap between verifying ownership and adding shipments. ────────────────
+export async function addCustomerShipments(
+  run: Run,
+  publicIdArg: string,
+  customerId: string,
+  orderPublicIds: string[],
+): Promise<ManifestRow & { shipments: ManifestShipmentRow[] }> {
+  return run(async (sql) => {
+    const { rows: mRows } = await sql.query<{ id: string; status: string }>(
+      "SELECT id, status FROM manifests WHERE public_id = $1 AND created_by_customer_id = $2",
+      [publicIdArg, customerId],
+    );
+    if (!mRows[0]) throw new ManifestError(404, "Manifest not found");
+    if (mRows[0].status !== "open") throw new ManifestError(400, "Can only add shipments to an open manifest");
+    const manifestId = mRows[0].id;
+
+    for (const orderPublicId of orderPublicIds) {
+      const { rows: orderRows } = await sql.query<{ id: string }>(
+        "SELECT id FROM orders WHERE public_id = $1 AND customer_id = $2",
+        [orderPublicId, customerId],
+      );
+      if (!orderRows[0]) throw new ManifestError(404, `Order not found: ${orderPublicId}`);
+      const orderId = orderRows[0]!.id;
+
+      // Cross-manifest duplicate check (G-Q2) — same rule as staff
+      // addShipments: an order can't sit on two live (non-dispatched)
+      // manifests at once.
+      const { rows: dupe } = await sql.query(
+        `SELECT m.manifest_no FROM manifest_shipments ms
+           JOIN manifests m ON m.id = ms.manifest_id
+          WHERE ms.order_id = $1 AND m.status <> 'dispatched'
+          FOR UPDATE OF ms`,
+        [orderId],
+      );
+      if (dupe.length > 0) {
+        throw new ManifestError(409, `Order ${orderPublicId} is already on manifest ${dupe[0]!.manifest_no}`);
+      }
+
+      await sql.query(
+        `INSERT INTO manifest_shipments (manifest_id, branch_id, order_id)
+         SELECT $1, branch_id, $2 FROM manifests WHERE id = $1
+         ON CONFLICT (manifest_id, order_id) DO NOTHING`,
+        [manifestId, orderId],
+      );
+    }
+
+    await recomputeTotals(sql, manifestId);
+    return fetchManifestBySql(sql, publicIdArg);
+  });
+}
+
+// ── Remove one shipment (customer, open manifests only) ─────────────────────
+export async function removeCustomerShipment(
+  run: Run,
+  publicIdArg: string,
+  customerId: string,
+  orderPublicId: string,
+): Promise<ManifestRow & { shipments: ManifestShipmentRow[] }> {
+  return run(async (sql) => {
+    const { rows: mRows } = await sql.query<{ id: string; status: string }>(
+      "SELECT id, status FROM manifests WHERE public_id = $1 AND created_by_customer_id = $2",
+      [publicIdArg, customerId],
+    );
+    if (!mRows[0]) throw new ManifestError(404, "Manifest not found");
+    if (mRows[0].status !== "open") throw new ManifestError(400, "Can only remove shipments from an open manifest");
+    const manifestId = mRows[0].id;
+
+    await sql.query(
+      `DELETE FROM manifest_shipments
+        WHERE manifest_id = $1
+          AND order_id = (SELECT id FROM orders WHERE public_id = $2)`,
+      [manifestId, orderPublicId],
+    );
+
+    await recomputeTotals(sql, manifestId);
+    return fetchManifestBySql(sql, publicIdArg);
+  });
+}
+
+// ── Search the customer's own orders eligible to add to a manifest ────────
+export async function searchEligibleOrdersForCustomer(
+  run: Run,
+  customerId: string,
+  q?: string,
+): Promise<EligibleOrderRow[]> {
+  return run(async (sql) => {
+    const conds: string[] = [
+      `o.customer_id = $1`,
+      `NOT EXISTS (
+         SELECT 1 FROM manifest_shipments ms
+           JOIN manifests m ON m.id = ms.manifest_id
+          WHERE ms.order_id = o.id AND m.status <> 'dispatched'
+       )`,
+      `o.order_status IN ('awaiting_carrier', 'active')`,
+    ];
+    const params: unknown[] = [customerId];
+
+    const trimmed = q?.trim();
+    if (trimmed) {
+      params.push(`%${trimmed}%`);
+      conds.push(`o.tracking_code ILIKE $${params.length}`);
     }
 
     const { rows } = await sql.query(

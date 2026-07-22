@@ -12,6 +12,7 @@ import {
   requireStaff,
   requireCustomer,
   requirePermission,
+  requireSuperAdmin,
 } from "../../middleware/auth.js";
 import { isStaff, isCustomer } from "../auth/types.js";
 import { createOrderSchema, editOrderSchema, legSchema } from "./schema.js";
@@ -22,6 +23,7 @@ import {
   deleteOrder,
   attachLegs,
   editLeg,
+  deleteLeg,
   listOrders,
   getOrderDetail,
   resolveOrderId,
@@ -188,6 +190,30 @@ orderRouter.patch(
     try {
       const result = await editLeg(req.db!, param(req.params.publicId), seq, parsed.data);
       return res.json({ ok: true, eventsCleared: result.cleared });
+    } catch (err) {
+      return handleOrderError(err, res);
+    }
+  }),
+);
+
+// ── SUPER-ADMIN: permanently delete a carrier leg from an order ─────────────
+// Corrective/cleanup action only — undoes tracking activation if it was the
+// last leg — so this is restricted to super_admin, not the general
+// tracking.manage permission that attach/edit use.
+orderRouter.delete(
+  "/:publicId/legs/:sequence",
+  requireStaff,
+  requireSuperAdmin,
+  asyncHandler(async (req, res) => {
+    const seq = Number(param(req.params.sequence));
+    if (!Number.isInteger(seq) || seq < 1) return res.status(400).json({ error: "Invalid leg sequence" });
+    try {
+      const result = await deleteLeg(req.db!, param(req.params.publicId), seq);
+      return res.json({
+        ok: true,
+        remainingLegs: result.remainingLegs,
+        revertedToAwaitingCarrier: result.revertedToAwaitingCarrier,
+      });
     } catch (err) {
       return handleOrderError(err, res);
     }

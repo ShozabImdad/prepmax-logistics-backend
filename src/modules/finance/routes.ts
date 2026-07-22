@@ -4,6 +4,10 @@
 //
 // Layout:
 //   GET    /api/finance/dashboard
+//   GET    /api/finance/bank-accounts
+//   POST   /api/finance/bank-accounts
+//   PATCH  /api/finance/bank-accounts/:publicId
+//   DELETE /api/finance/bank-accounts/:publicId
 //   GET    /api/finance/vendors
 //   POST   /api/finance/vendors
 //   PATCH  /api/finance/vendors/:publicId
@@ -39,6 +43,7 @@ import {
   createVendorBillSchema, updateVendorBillSchema,
   createPaymentSchema,
   createExpenseSchema, updateExpenseSchema,
+  createBankAccountSchema, updateBankAccountSchema,
   reportPeriodSchema,
 } from "./schema.js";
 import {
@@ -49,6 +54,7 @@ listVendors, createVendor, updateVendor, deleteVendor, hardDeleteVendor, getVend
   listVendorBills, getVendorBill, createVendorBill, updateVendorBill, deleteVendorBill,
   listPayments, createPayment, deletePayment,
   listExpenses, createExpense, updateExpense, deleteExpense,
+  listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,
   getFinanceDashboard, getFinanceReport,
 } from "./queries.js";
 
@@ -104,6 +110,69 @@ financeRouter.get(
     const to = str(req.query.to);
     const dashboard = await getFinanceDashboard(req.db!, { from, to });
     return res.json({ dashboard });
+  }),
+);
+
+// ── Bank Accounts (cash + named bank accounts) ──────────────────────────────
+financeRouter.get(
+  "/bank-accounts",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    const activeOnly = req.query.activeOnly === "true";
+    const accountType = str(req.query.accountType);
+    const branchPublicId = str(req.query.branchPublicId);
+    const bankAccounts = await listBankAccounts(req.db!, { activeOnly, accountType, branchPublicId });
+    return res.json({ bankAccounts });
+  }),
+);
+
+financeRouter.post(
+  "/bank-accounts",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    const parsed = createBankAccountSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid bank account", details: parsed.error.flatten() });
+    }
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    try {
+      const branchId = await resolveBranchId(req, staff, parsed.data.branchPublicId);
+      const bankAccount = await createBankAccount(req.db!, branchId, staff.userId, parsed.data);
+      return res.status(201).json({ bankAccount });
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
+financeRouter.patch(
+  "/bank-accounts/:publicId",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    const parsed = updateBankAccountSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid bank account update", details: parsed.error.flatten() });
+    }
+    try {
+      const bankAccount = await updateBankAccount(req.db!, param(req.params.publicId), parsed.data);
+      return res.json({ bankAccount });
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
+financeRouter.delete(
+  "/bank-accounts/:publicId",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      await deleteBankAccount(req.db!, param(req.params.publicId));
+      return res.json({ ok: true });
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
   }),
 );
 

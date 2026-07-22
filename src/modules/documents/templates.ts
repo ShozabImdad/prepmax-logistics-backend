@@ -55,6 +55,15 @@ function esc(s: unknown): string {
   );
 }
 
+// Customer/carrier-facing label for an order's declared contents.
+// "documents" prints exactly as before (unchanged); any non-documents value
+// (currently just "merchandise") prints as "Non-Docs/Parcel" instead of the
+// raw internal value.
+function contentsLabel(nature: string | null | undefined): string {
+  if (!nature) return "—";
+  return nature === "documents" ? nature : "Non-Docs/Parcel";
+}
+
 function contactBlock(c: DocContact): string {
   const lines = [
     c.name ? `<strong>${esc(c.name)}</strong>` : "",
@@ -297,7 +306,7 @@ export function receiptHtml(d: DocData, barcode: string): string {
       <div class="kv">
         <div class="k">Tracking number</div><div><strong>${esc(d.trackingCode)}</strong></div>
         <div class="k">Service type</div><div>${esc(d.serviceType ?? "—")}</div>
-        <div class="k">Contents</div><div>${esc(d.contentsNature ?? "—")}</div>
+        <div class="k">Contents</div><div>${esc(contentsLabel(d.contentsNature))}</div>
         <div class="k">Declared value</div><div>${esc(declared)}</div>
         <div class="k">Shipping price</div><div>${esc(priceLine)}</div>
         <div class="k">Pieces</div><div>${d.pieceCount}</div>
@@ -440,7 +449,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
       <div class="meta">
         <div class="cell">
           <div class="k">Contents</div>
-          <div class="v">${esc(d.contentsNature ?? "—")}</div>
+          <div class="v">${esc(contentsLabel(d.contentsNature))}</div>
         </div>
         <div class="cell">
           <div class="k">Wt:</div>
