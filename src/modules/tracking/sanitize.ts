@@ -64,3 +64,68 @@ export function redactCarrier(value: string | null | undefined): string | null {
   out = out.replace(/^[\s,;:.-]+|[\s,;:.-]+$/g, "").trim();
   return out.length === 0 ? null : out;
 }
+
+// ── Customer-facing operational-detail cleanup ──────────────────────────────
+// Separate from carrier-brand redaction: this strips internal logistics noise
+// the customer shouldn't need to see — flight numbers/routes, aircraft linehaul
+// blocks, bag/piece/weight annotations — and normalizes Pakistan Post's postal
+// facility abbreviations. Applied at READ time to every stored event on the
+// public + customer surfaces, so it fixes historical events too (no re-sync or
+// data migration needed). Rules are derived from real SkyNet + Pakistan Post
+// event text captured live (2026-07):
+//   SkyNet:  "Linehaul Arrival - TG0346, 22 JUL 2026, ATD 00:18, LHE-BKK,
+//             ATA - 22 JUL 2026 - 03:56 1 Pcs 645.0 Kgs"
+//            "Sorted to Destination - Bagged for DXB, Item 01 Bag 13"
+//            "Arrived Hub - Arrived Lahore Piece: 1 Weight: 0.1 Kgs"
+//   PakPost: "Handedover to airline flight no:PK 0279 / QR 1014, Destination
+//             IQBGWA"  ·  "Booked at Sahiwal GPO"  ·  location "IMO Lahore"
+//
+// SkyNet stores its event as "<clean event name> - <operational detail>". The
+// operational detail (flight code, ATD/ATA, airport pair, bag/piece/weight) is
+// exactly what we drop, so we keep only the clean event name before the first
+// " - ". Pakistan Post has no " - " split, so for it we surgically cut the
+// "flight no ..." tail and a trailing "GPO".
+
+/**
+ * Clean an event DESCRIPTION for customer display. Removes flight/linehaul and
+ * bag/piece/weight detail. Never returns null (an event always keeps a label);
+ * callers already fall back to "Shipment update" if this yields empty.
+ */
+export function cleanEventText(value: string | null | undefined): string {
+  if (!value) return "";
+  let out = value;
+
+  // SkyNet: keep only the clean event name before the first " - " separator.
+  // ("Linehaul Arrival - TG0346, ...645.0 Kgs" -> "Linehaul Arrival";
+  //  "Sorted to Destination - Bagged for DXB..." -> "Sorted to Destination").
+  const dash = out.indexOf(" - ");
+  if (dash !== -1) out = out.slice(0, dash);
+
+  // Pakistan Post (no " - " split): cut the flight-number tail
+  // ("Handedover to airline flight no:PK 0279 / QR 1014, ..." ->
+  //  "Handedover to airline") and drop a trailing "GPO"
+  // ("Booked at Sahiwal GPO" -> "Booked at Sahiwal").
+  out = out.replace(/\s*flight\s*no\b.*$/i, "");
+  out = out.replace(/\s+GPO\b\.?$/i, "");
+
+  return out.replace(/\s{2,}/g, " ").trim();
+}
+
+/**
+ * Clean an event LOCATION for customer display. Strips Pakistan Post's postal
+ * facility abbreviations (IMO = International Mail Office, GPO = General Post
+ * Office) as leading/trailing whole words, and drops the literal "-" placeholder
+ * PakPost uses for location-less rows. Capitalization is left untouched
+ * (e.g. "BAGHDAD" stays as-is). Returns null when nothing meaningful remains.
+ */
+export function cleanEventLocation(value: string | null | undefined): string | null {
+  if (!value) return value ?? null;
+  let out = value.trim();
+  if (!out || out === "-") return null;
+  out = out
+    .replace(/^(?:IMO|GPO)\s+/i, "")
+    .replace(/\s+(?:IMO|GPO)$/i, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return out.length === 0 ? null : out;
+}

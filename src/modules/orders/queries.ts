@@ -4,7 +4,7 @@
 import type { Sql } from "../../db/pool.js";
 import { OrderError, attachLegsInTx, insertBoxesAndItems } from "./service.js";
 import type { LegInput, EditOrderInput } from "./schema.js";
-import { redactCarrier } from "../tracking/sanitize.js";
+import { redactCarrier, cleanEventText, cleanEventLocation } from "../tracking/sanitize.js";
 import { lookupDeliveryRange } from "./delivery-times.js";
 import { addWorkingDays, toDateOnly } from "../../lib/working-days.js";
 import { recomputeTotals } from "../manifest/queries.js";
@@ -539,13 +539,15 @@ export async function getOrderDetail(
       totalChargeableKg: Number(
         boxesOut.reduce((s, b) => s + (b.chargeableKg as number), 0).toFixed(3),
       ),
-      // For customers, redact carrier branding from the event text (location +
-      // description) and hide the carrier field entirely. Staff see it raw.
+      // For customers: redact carrier branding AND strip operational noise
+      // (flight numbers, linehaul/bag/weight detail, IMO/GPO postal tags) from
+      // the event text, and hide the carrier field entirely. Staff see it raw
+      // — full detail, no redaction or cleanup.
       trackingEvents: events.rows.map((e) => ({
         time: e.event_time, timeRaw: e.event_time_raw,
-        location: opts.forCustomer ? redactCarrier(e.location) : e.location,
+        location: opts.forCustomer ? cleanEventLocation(redactCarrier(e.location)) : e.location,
         description: opts.forCustomer
-          ? (redactCarrier(e.description) ?? "Shipment update")
+          ? (cleanEventText(redactCarrier(e.description)) || "Shipment update")
           : e.description,
         carrier: opts.forCustomer ? undefined : e.carrier,
         leg: e.sequence,
