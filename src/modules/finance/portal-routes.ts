@@ -39,7 +39,7 @@ portalFinanceRouter.get(
       const nonVoid = invoices.filter((i) => i.status !== "void");
       const totalInvoiced = nonVoid.reduce((s, i) => s + i.total, 0);
       const totalPaid = nonVoid.reduce((s, i) => s + i.amountPaid, 0);
-      const totalPending = nonVoid.reduce((s, i) => s + Math.max(0, i.total - i.amountPaid), 0);
+    const totalPending = nonVoid.reduce((s, i) => s + Math.max(0, i.total - i.amountPaid - i.creditedAmount), 0);
       return res.json({
         summary: {
           outstandingBalance: ledger.closingBalance, // running balance from the ledger — the authoritative "what you owe"

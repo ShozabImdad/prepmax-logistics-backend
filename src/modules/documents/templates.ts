@@ -44,7 +44,7 @@ function loadLogoDataUri(): string {
   }
 }
 
-const logoDataUri = loadLogoDataUri();
+export const logoDataUri = loadLogoDataUri();
 
 // ============================================================================
 // HELPERS
@@ -107,7 +107,7 @@ function addressLines(c: DocContact): string {
 // own `.label-page` class — so its small fixed-size layout can never
 // collide with or override the A4 sizing here.
 // ============================================================================
-const SHARED_CSS = `
+export const SHARED_CSS = `
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body { font-family: "Segoe UI", Arial, sans-serif; color: #111; font-size: 11px; }

@@ -84,7 +84,7 @@ export type VendorBillItemInput = z.infer<typeof vendorBillItemSchema>;
 export const createVendorBillSchema = z.object({
   branchPublicId: z.string().optional(),  // required for super_admin
   vendorPublicId: z.string().min(1),
-  billNo: z.string().max(120).optional(),
+  // billNo: z.string().max(120).optional(),
   billDate: z.string().optional(),
   dueDate: z.string().optional(),
   currency: z.string().max(3).default("PKR"),

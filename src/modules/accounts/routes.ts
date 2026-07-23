@@ -35,10 +35,21 @@ accountsRouter.post(
     const row = await withSuperAdminAllBranches(async (sql) => {
       const { rows } = await sql.query(
         `INSERT INTO branches (public_id, name, city) VALUES ($1,$2,$3)
-         RETURNING public_id, name, city, is_active`,
+         RETURNING id, public_id, name, city, is_active`,
         [publicId(), parsed.data.name, parsed.data.city],
       );
-      return rows[0];
+      const branch = rows[0];
+      // Every branch needs its own house vendor ("Prepmax Logistics",
+      // is_house_vendor = true) — migration 0027 only seeded this for
+      // branches that existed at migration time, so any branch created
+      // afterward through this route must get one here or customer-portal
+      // manifests for that branch will 500 on getHouseVendorId().
+      await sql.query(
+        `INSERT INTO vendors (public_id, branch_id, name, vendor_type, is_house_vendor, is_protected)
+         VALUES ($1,$2,'Prepmax Logistics','other',true,true)`,
+        [publicId(), branch.id],
+      );
+      return branch;
     });
     // camelCase to match the list endpoint + frontend contract.
     return res.status(201).json({

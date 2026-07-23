@@ -160,13 +160,14 @@ export interface VendorRow {
   address: string | null;
   openingBalance: number;
   isActive: boolean;
+  isProtected: boolean;
   createdAt: string;
   updatedAt: string;
 }
 
 const VENDOR_FIELDS = `
   v.public_id, v.name, v.code, v.vendor_type, v.contact_name, v.phone, v.email,
-  v.address, v.opening_balance, v.is_active, v.created_at, v.updated_at
+  v.address, v.opening_balance, v.is_active, v.is_protected, v.created_at, v.updated_at
 `;
 
 function mapVendor(r: Record<string, unknown>): VendorRow {
@@ -181,6 +182,7 @@ function mapVendor(r: Record<string, unknown>): VendorRow {
     address: (r.address as string | null) ?? null,
     openingBalance: n(r.opening_balance),
     isActive: r.is_active as boolean,
+    isProtected: r.is_protected as boolean,
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string,
   };
@@ -231,6 +233,15 @@ export async function createVendor(run: Run, branchId: string, userId: string, i
 
 export async function updateVendor(run: Run, publicIdArg: string, input: UpdateVendorInput): Promise<VendorRow> {
   return run(async (sql) => {
+    const { rows: guardRows } = await sql.query<{ is_protected: boolean }>(
+      "SELECT is_protected FROM vendors WHERE public_id = $1",
+      [publicIdArg],
+    );
+    if (!guardRows[0]) throw new FinanceError(404, "Vendor not found");
+    if (guardRows[0].is_protected) {
+      throw new FinanceError(403, "This vendor is a protected system record and cannot be edited");
+    }
+
     const sets: string[] = [];
     const params: unknown[] = [];
     const push = (col: string, val: unknown) => {
@@ -257,17 +268,29 @@ export async function updateVendor(run: Run, publicIdArg: string, input: UpdateV
 
 export async function deleteVendor(run: Run, publicIdArg: string): Promise<void> {
   return run(async (sql) => {
+    const { rows: guardRows } = await sql.query<{ is_protected: boolean }>(
+      "SELECT is_protected FROM vendors WHERE public_id = $1",
+      [publicIdArg],
+    );
+    if (!guardRows[0]) throw new FinanceError(404, "Vendor not found");
+    if (guardRows[0].is_protected) {
+      throw new FinanceError(403, "This vendor is a protected system record and cannot be deactivated");
+    }
     const { rowCount } = await sql.query("UPDATE vendors SET is_active = false WHERE public_id = $1", [publicIdArg]);
     if (rowCount === 0) throw new FinanceError(404, "Vendor not found");
   });
 }
+
 export async function hardDeleteVendor(run: Run, publicIdArg: string): Promise<{ billsDeleted: number; paymentsDeleted: number }> {
   return run(async (sql) => {
-    const { rows } = await sql.query<{ id: string }>(
-      "SELECT id FROM vendors WHERE public_id = $1",
+    const { rows } = await sql.query<{ id: string; is_protected: boolean }>(
+      "SELECT id, is_protected FROM vendors WHERE public_id = $1",
       [publicIdArg],
     );
     if (!rows[0]) throw new FinanceError(404, "Vendor not found");
+    if (rows[0].is_protected) {
+      throw new FinanceError(403, "This vendor is a protected system record and cannot be deleted");
+    }
     const vendorId = rows[0].id;
 
     const { rowCount: billsDeleted } = await sql.query(
@@ -300,8 +323,12 @@ export interface InvoiceRow {
   invoiceNo: string;
   customerPublicId: string;
   customerName: string | null;
+  customerEmail: string | null;
+  customerPhone: string | null;
   orderPublicId: string | null;
   branchPublicId: string;
+  branchName: string | null;
+  branchCity: string | null;
   isCreditNote: boolean;
   referencedInvoicePublicId: string | null;
   referencedInvoiceNo: string | null;
@@ -311,7 +338,8 @@ export interface InvoiceRow {
   subtotal: number;
   tax: number;
   total: number;
-  amountPaid: number;
+ amountPaid: number;
+  creditedAmount: number;
   status: string;
   notes: string | null;
   createdAt: string;
@@ -321,11 +349,15 @@ export interface InvoiceRow {
 
 const INVOICE_FIELDS = `
   i.public_id, i.invoice_no, cu.public_id AS customer_public_id,
-  cu.full_name AS customer_name, o.public_id AS order_public_id,
-  b.public_id AS branch_public_id,
+  cu.full_name AS customer_name, cu.email AS customer_email, cu.phone AS customer_phone,
+  o.public_id AS order_public_id,
+  b.public_id AS branch_public_id, b.name AS branch_name, b.city AS branch_city,
   i.is_credit_note, i.issue_date, i.due_date, i.currency,
   i.subtotal, i.tax, i.total, i.amount_paid, i.status, i.notes,
   ri.public_id AS referenced_invoice_public_id, ri.invoice_no AS referenced_invoice_no,
+  COALESCE((SELECT SUM(-cn.total) FROM invoices cn
+             WHERE cn.referenced_invoice_id = i.id
+               AND cn.is_credit_note AND cn.status <> 'void'), 0) AS credited_amount,
   i.created_at, i.updated_at
 `;
 
@@ -335,8 +367,12 @@ function mapInvoice(r: Record<string, unknown>): InvoiceRow {
     invoiceNo: r.invoice_no as string,
     customerPublicId: r.customer_public_id as string,
     customerName: (r.customer_name as string | null) ?? null,
+    customerEmail: (r.customer_email as string | null) ?? null,
+    customerPhone: (r.customer_phone as string | null) ?? null,
     orderPublicId: (r.order_public_id as string | null) ?? null,
     branchPublicId: r.branch_public_id as string,
+    branchName: (r.branch_name as string | null) ?? null,
+    branchCity: (r.branch_city as string | null) ?? null,
     isCreditNote: r.is_credit_note as boolean,
     referencedInvoicePublicId: (r.referenced_invoice_public_id as string | null) ?? null,
     referencedInvoiceNo: (r.referenced_invoice_no as string | null) ?? null,
@@ -345,8 +381,9 @@ function mapInvoice(r: Record<string, unknown>): InvoiceRow {
     currency: r.currency as string,
     subtotal: n(r.subtotal),
     tax: n(r.tax),
-    total: n(r.total),
+ total: n(r.total),
     amountPaid: n(r.amount_paid),
+    creditedAmount: n(r.credited_amount),
     status: r.status as string,
     notes: (r.notes as string | null) ?? null,
     createdAt: r.created_at as string,
@@ -459,6 +496,31 @@ async function nextInvoiceNo(sql: Sql, branchId: string): Promise<string> {
   return `PML-INV-${year}-${String(seq).padStart(6, "0")}`;
 }
 
+// Vendor bills no longer take a user-supplied bill number (removed from the
+// frontend form) — every bill gets one auto-assigned, same per-branch/year
+// sequence pattern as invoices.
+async function nextVendorBillNo(sql: Sql, branchId: string): Promise<string> {
+  const year = new Date().getFullYear();
+  const { rows } = await sql.query<{ seq: number }>(
+    `SELECT COALESCE(MAX(
+       CASE WHEN bill_no ~ ('^PML-BILL-' || $2::text || '-\\d+$')
+         THEN substring(bill_no FROM '\\d+$')::int
+         ELSE 0
+       END
+     ), 0) + 1 AS seq
+    FROM (
+  SELECT bill_no
+    FROM vendor_bills
+   WHERE branch_id = $1
+     AND bill_no LIKE ('PML-BILL-' || $2::text || '-%')
+   FOR UPDATE
+) locked`,
+    [branchId, year],
+  );
+  const seq = rows[0]!.seq;
+  return `PML-BILL-${year}-${String(seq).padStart(6, "0")}`;
+}
+
 export async function createInvoice(
   run: Run,
   branchId: string,
@@ -489,8 +551,12 @@ export async function createInvoice(
     // not reference a specific invoice).
     let referencedInvoiceId: string | null = null;
     if (input.referencedInvoicePublicId) {
-      const { rows: refRows } = await sql.query<{ id: string; customer_id: string; total: string; amount_paid: string }>(
-        "SELECT id, customer_id, total, amount_paid FROM invoices WHERE public_id = $1",
+    const { rows: refRows } = await sql.query<{ id: string; customer_id: string; total: string; amount_paid: string; already_credited: string }>(
+        `SELECT i.id, i.customer_id, i.total, i.amount_paid,
+                COALESCE((SELECT SUM(-cn.total) FROM invoices cn
+                           WHERE cn.referenced_invoice_id = i.id
+                             AND cn.is_credit_note AND cn.status <> 'void'), 0) AS already_credited
+           FROM invoices i WHERE i.public_id = $1`,
         [input.referencedInvoicePublicId],
       );
       if (!refRows[0]) throw new FinanceError(404, "Referenced invoice not found");
@@ -499,7 +565,11 @@ export async function createInvoice(
       }
       if (input.isCreditNote) {
         const creditAmount = input.items.reduce((s, it) => s + it.quantity * it.unitPrice, 0) + input.tax;
-        const remaining = Number(refRows[0].total) - Number(refRows[0].amount_paid);
+        // Remaining = total, minus what's already been paid, minus what's
+        // already been credited by earlier credit notes against this same
+        // invoice — otherwise a paid invoice still "shows" its original total
+        // as creditable, letting a new credit note double-dip.
+        const remaining = Number(refRows[0].total) - Number(refRows[0].amount_paid) - Number(refRows[0].already_credited);
         if (creditAmount > remaining) {
           throw new FinanceError(400, `Credit note amount exceeds the referenced invoice's remaining balance of ${remaining.toFixed(2)}`);
         }
@@ -543,12 +613,18 @@ export async function createInvoice(
 
 export async function updateInvoice(run: Run, publicIdArg: string, input: UpdateInvoiceInput): Promise<InvoiceRow> {
   return run(async (sql) => {
-    const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_credit_note: boolean; customer_id: string }>(
-      "SELECT id, branch_id, is_credit_note, customer_id FROM invoices WHERE public_id = $1",
+const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_credit_note: boolean; customer_id: string; referenced_invoice_id: string | null; total: string; status: string }>(
+      "SELECT id, branch_id, is_credit_note, customer_id, referenced_invoice_id, total, status FROM invoices WHERE public_id = $1",
       [publicIdArg],
     );
     if (!existing[0]) throw new FinanceError(404, "Invoice not found");
     const inv = existing[0]!;
+    // A paid invoice is settled — editing it (line items, amounts, dates…)
+    // would desync it from the payments already recorded against it.
+    // The only way out is a credit note or voiding, not a silent edit.
+    if (inv.status === "paid" && input.status === undefined) {
+      throw new FinanceError(400, "This invoice is fully paid and can no longer be edited");
+    }
 
     // Resolve optional references
     let customerId: string | undefined;
@@ -602,7 +678,8 @@ export async function updateInvoice(run: Run, publicIdArg: string, input: Update
     if (input.notes !== undefined) push("notes", input.notes);
     if (input.status !== undefined) push("status", input.status);
 
-    // Recompute totals if items changed OR tax changed OR credit-note flag flipped
+  // Recompute totals if items changed OR tax changed OR credit-note flag flipped
+    let finalTotal = Number(inv.total);
     if (input.items || input.tax !== undefined || input.isCreditNote !== undefined) {
       const itemRows = input.items
         ? await (async () => {
@@ -626,10 +703,36 @@ export async function updateInvoice(run: Run, publicIdArg: string, input: Update
             return rows.map((r) => ({ quantity: Number(r.quantity), unitPrice: Number(r.unit_price), description: "" }));
           })();
 
-      const { subtotal, tax: taxAdj, total } = computeInvoiceTotals(itemRows, tax, isCreditNote);
+   const { subtotal, tax: taxAdj, total } = computeInvoiceTotals(itemRows, tax, isCreditNote);
       push("subtotal", subtotal);
       push("tax", taxAdj);
       push("total", total);
+      finalTotal = total;
+    }
+
+    // Cap check: runs whenever this is (or is becoming) a credit note tied to
+    // an invoice — whether the trigger was an amount change OR just a
+    // re-link to a different referenced invoice. Can't credit more than that
+    // invoice's remaining balance: total paid, less what's already been
+    // credited by OTHER credit notes against it (excluding this one).
+    const effectiveReferencedInvoiceId = referencedInvoiceId !== undefined ? referencedInvoiceId : inv.referenced_invoice_id;
+    if (isCreditNote && effectiveReferencedInvoiceId) {
+      const { rows: refRows } = await sql.query<{ total: string; amount_paid: string; already_credited: string }>(
+        `SELECT ri.total, ri.amount_paid,
+                COALESCE((SELECT SUM(-cn.total) FROM invoices cn
+                           WHERE cn.referenced_invoice_id = ri.id
+                             AND cn.is_credit_note AND cn.status <> 'void'
+                             AND cn.id <> $2), 0) AS already_credited
+           FROM invoices ri WHERE ri.id = $1`,
+        [effectiveReferencedInvoiceId, inv.id],
+      );
+      if (refRows[0]) {
+        const remaining = Number(refRows[0].total) - Number(refRows[0].amount_paid) - Number(refRows[0].already_credited);
+        const creditAmount = -finalTotal; // total is stored negative for credit notes
+        if (creditAmount > remaining) {
+          throw new FinanceError(400, `Credit note amount exceeds the referenced invoice's remaining balance of ${remaining.toFixed(2)}`);
+        }
+      }
     }
 
     if (!sets.length) throw new FinanceError(400, "No fields to update");
@@ -669,6 +772,12 @@ export interface VendorBillRow {
   billNo: string | null;
   vendorPublicId: string;
   vendorName: string;
+  vendorContactName: string | null;
+  vendorPhone: string | null;
+  vendorEmail: string | null;
+  vendorAddress: string | null;
+  branchName: string | null;
+  branchCity: string | null;
   billDate: string;
   dueDate: string | null;
   currency: string;
@@ -685,6 +794,9 @@ export interface VendorBillRow {
 
 const BILL_FIELDS = `
   vb.public_id, vb.bill_no, v.public_id AS vendor_public_id, v.name AS vendor_name,
+  v.contact_name AS vendor_contact_name, v.phone AS vendor_phone,
+  v.email AS vendor_email, v.address AS vendor_address,
+  b.name AS branch_name, b.city AS branch_city,
   vb.bill_date, vb.due_date, vb.currency,
   vb.subtotal, vb.tax, vb.total, vb.amount_paid, vb.status, vb.notes,
   vb.created_at, vb.updated_at
@@ -696,6 +808,12 @@ function mapBill(r: Record<string, unknown>): VendorBillRow {
     billNo: (r.bill_no as string | null) ?? null,
     vendorPublicId: r.vendor_public_id as string,
     vendorName: r.vendor_name as string,
+    vendorContactName: (r.vendor_contact_name as string | null) ?? null,
+    vendorPhone: (r.vendor_phone as string | null) ?? null,
+    vendorEmail: (r.vendor_email as string | null) ?? null,
+    vendorAddress: (r.vendor_address as string | null) ?? null,
+    branchName: (r.branch_name as string | null) ?? null,
+    branchCity: (r.branch_city as string | null) ?? null,
     billDate: r.bill_date as string,
     dueDate: (r.due_date as string | null) ?? null,
     currency: r.currency as string,
@@ -727,6 +845,7 @@ export async function listVendorBills(run: Run, opts: { status?: string; q?: str
     const { rows } = await sql.query(
       `SELECT ${BILL_FIELDS} FROM vendor_bills vb
          JOIN vendors v ON v.id = vb.vendor_id
+         JOIN branches b ON b.id = vb.branch_id
          ${where}
         ORDER BY vb.bill_date DESC, vb.created_at DESC
         LIMIT 300`,
@@ -745,6 +864,7 @@ async function fetchVendorBillBySql(sql: Sql, publicIdArg: string): Promise<Vend
   const { rows } = await sql.query(
     `SELECT ${BILL_FIELDS} FROM vendor_bills vb
        JOIN vendors v ON v.id = vb.vendor_id
+       JOIN branches b ON b.id = vb.branch_id
       WHERE vb.public_id = $1`,
     [publicIdArg],
   );
@@ -769,7 +889,6 @@ async function fetchVendorBillBySql(sql: Sql, publicIdArg: string): Promise<Vend
 export async function getVendorBill(run: Run, publicIdArg: string): Promise<VendorBillRow> {
   return run((sql) => fetchVendorBillBySql(sql, publicIdArg));
 }
-
 export async function createVendorBill(
   run: Run,
   branchId: string,
@@ -777,6 +896,10 @@ export async function createVendorBill(
   input: CreateVendorBillInput,
 ): Promise<VendorBillRow> {
   return run(async (sql) => {
+    if (!input.items || input.items.length === 0) {
+      throw new FinanceError(400, "A vendor bill must have at least one line item");
+    }
+
     const { rows: vendorRows } = await sql.query<{ id: string }>(
       "SELECT id FROM vendors WHERE public_id = $1",
       [input.vendorPublicId],
@@ -787,6 +910,7 @@ export async function createVendorBill(
     const total = subtotal + input.tax;
     const pid = publicId();
     const status = total > 0 ? input.status : "paid";
+    const billNo = await nextVendorBillNo(sql, branchId);
 
     const { rows: billRows } = await sql.query<{ id: string }>(
       `INSERT INTO vendor_bills
@@ -795,7 +919,7 @@ export async function createVendorBill(
        VALUES ($1,$2,$3,$4,COALESCE($5,CURRENT_DATE),$6,$7,$8,$9,$10,0,$11,$12,$13)
        RETURNING id`,
       [
-        pid, branchId, input.billNo ?? null, vendorRows[0]!.id,
+        pid, branchId, billNo, vendorRows[0]!.id,
         input.billDate ?? null, input.dueDate ?? null, input.currency,
         subtotal, input.tax, total, status, input.notes ?? null, userId,
       ],
@@ -826,12 +950,17 @@ export async function updateVendorBill(
   input: UpdateVendorBillInput,
 ): Promise<VendorBillRow> {
   return run(async (sql) => {
-    const { rows: existing } = await sql.query<{ id: string; branch_id: string }>(
-      "SELECT id, branch_id FROM vendor_bills WHERE public_id = $1",
+    const { rows: existing } = await sql.query<{ id: string; branch_id: string; status: string }>(
+      "SELECT id, branch_id, status FROM vendor_bills WHERE public_id = $1",
       [publicIdArg],
     );
     if (!existing[0]) throw new FinanceError(404, "Vendor bill not found");
     const bill = existing[0]!;
+    // Same rule as invoices — a fully paid bill is settled; only a status
+    // change (e.g. voiding) is allowed past this point, not a content edit.
+    if (bill.status === "paid" && input.status === undefined) {
+      throw new FinanceError(400, "This bill is fully paid and can no longer be edited");
+    }
 
     let vendorId: string | undefined;
     if (input.vendorPublicId !== undefined) {
@@ -844,14 +973,18 @@ export async function updateVendorBill(
     const params: unknown[] = [];
     const push = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
     if (vendorId !== undefined) push("vendor_id", vendorId);
-    if (input.billNo !== undefined) push("bill_no", input.billNo);
+    // if (input.billNo !== undefined) push("bill_no", input.billNo);
     if (input.billDate !== undefined) push("bill_date", input.billDate);
     if (input.dueDate !== undefined) push("due_date", input.dueDate);
     if (input.currency !== undefined) push("currency", input.currency);
     if (input.notes !== undefined) push("notes", input.notes);
     if (input.status !== undefined) push("status", input.status);
 
-    if (input.items || input.tax !== undefined) {
+ if (input.items || input.tax !== undefined) {
+      if (input.items && input.items.length === 0) {
+        throw new FinanceError(400, "A vendor bill must have at least one line item");
+      }
+
       // Replace items if provided, otherwise load existing for recompute
       const items: VendorBillItemInput[] = input.items
         ? await (async () => {
@@ -1033,13 +1166,19 @@ export async function createPayment(
       if (!rows[0]) throw new FinanceError(404, "Vendor not found");
       vendorId = rows[0]!.id;
     }
-    if (input.invoicePublicId) {
-      const { rows } = await sql.query<{ id: string; amount_paid: string; total: string; status: string }>(
-        "SELECT id, amount_paid, total, status FROM invoices WHERE public_id = $1",
+  if (input.invoicePublicId) {
+      const { rows } = await sql.query<{ id: string; amount_paid: string; total: string; status: string; credited: string }>(
+        `SELECT i.id, i.amount_paid, i.total, i.status,
+                COALESCE((SELECT SUM(-cn.total) FROM invoices cn
+                           WHERE cn.referenced_invoice_id = i.id
+                             AND cn.is_credit_note AND cn.status <> 'void'), 0) AS credited
+           FROM invoices i WHERE i.public_id = $1`,
         [input.invoicePublicId],
       );
       if (!rows[0]) throw new FinanceError(404, "Invoice not found");
-      const remaining = n(rows[0]!.total) - n(rows[0]!.amount_paid);
+      // Remaining collectible = total, less what's already been paid, less
+      // what's been written off by credit notes referencing this invoice.
+      const remaining = n(rows[0]!.total) - n(rows[0]!.amount_paid) - n(rows[0]!.credited);
       if (input.amount > remaining) {
         throw new FinanceError(400, `Payment amount exceeds remaining invoice balance of ${remaining.toFixed(2)}`);
       }
@@ -1075,11 +1214,15 @@ export async function createPayment(
     // stays consistent. Run inside the same transaction.
     if (invoiceId) {
       await sql.query(
-        `UPDATE invoices SET
+      `UPDATE invoices SET
            amount_paid = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in'),
            status = CASE
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in') >= total THEN 'paid'
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in') > 0 THEN 'partial'
+             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
+                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
+                  >= total THEN 'paid'
+             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
+                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
+                  > 0 THEN 'partial'
              ELSE 'unpaid' END
          WHERE id = $1`,
         [invoiceId],
@@ -1129,8 +1272,12 @@ export async function deletePayment(run: Run, publicIdArg: string): Promise<void
         `UPDATE invoices SET
            amount_paid = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in'),
            status = CASE
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in') >= total THEN 'paid'
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in') > 0 THEN 'partial'
+             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
+                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
+                  >= total THEN 'paid'
+             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
+                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
+                  > 0 THEN 'partial'
              ELSE 'unpaid' END
          WHERE id = $1`,
         [invoiceId],
@@ -1328,7 +1475,8 @@ export async function getCustomerLedger(run: Run, customerPublicId: string): Pro
                   THEN COALESCE(NULLIF(i.notes,''), 'Credit Note (general adjustment, no invoice referenced)')
                 ELSE COALESCE(NULLIF(i.notes,''), 'Invoice ' || i.invoice_no)
               END AS descr,
-              i.total AS debit, 0 AS credit
+             CASE WHEN i.is_credit_note THEN 0 ELSE i.total END AS debit,
+              CASE WHEN i.is_credit_note THEN -i.total ELSE 0 END AS credit
          FROM invoices i
          LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
         WHERE i.customer_id = $1 AND i.status <> 'void'
@@ -1409,6 +1557,68 @@ export async function getVendorLedger(run: Run, vendorPublicId: string): Promise
       });
     }
     return { entries, closingBalance: balance };
+  });
+}
+
+// ── Ledger PDF letterhead helpers ────────────────────────────────────────────
+export interface CustomerHeaderInfo {
+  name: string;
+  email: string | null;
+  phone: string | null;
+  branchName: string | null;
+  branchCity: string | null;
+}
+
+export async function getCustomerHeaderInfo(run: Run, customerPublicId: string): Promise<CustomerHeaderInfo> {
+  return run(async (sql) => {
+    const { rows } = await sql.query(
+      `SELECT cu.full_name, cu.email, cu.phone, b.name AS branch_name, b.city AS branch_city
+         FROM customers cu JOIN branches b ON b.id = cu.branch_id
+        WHERE cu.public_id = $1`,
+      [customerPublicId],
+    );
+    if (!rows[0]) throw new FinanceError(404, "Customer not found");
+    const r = rows[0]!;
+    return {
+      name: r.full_name as string,
+      email: (r.email as string | null) ?? null,
+      phone: (r.phone as string | null) ?? null,
+      branchName: (r.branch_name as string | null) ?? null,
+      branchCity: (r.branch_city as string | null) ?? null,
+    };
+  });
+}
+
+export interface VendorHeaderInfo {
+  name: string;
+  contactName: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  branchName: string | null;
+  branchCity: string | null;
+}
+
+export async function getVendorHeaderInfo(run: Run, vendorPublicId: string): Promise<VendorHeaderInfo> {
+  return run(async (sql) => {
+    const { rows } = await sql.query(
+      `SELECT v.name, v.contact_name, v.phone, v.email, v.address,
+              b.name AS branch_name, b.city AS branch_city
+         FROM vendors v JOIN branches b ON b.id = v.branch_id
+        WHERE v.public_id = $1`,
+      [vendorPublicId],
+    );
+    if (!rows[0]) throw new FinanceError(404, "Vendor not found");
+    const r = rows[0]!;
+    return {
+      name: r.name as string,
+      contactName: (r.contact_name as string | null) ?? null,
+      phone: (r.phone as string | null) ?? null,
+      email: (r.email as string | null) ?? null,
+      address: (r.address as string | null) ?? null,
+      branchName: (r.branch_name as string | null) ?? null,
+      branchCity: (r.branch_city as string | null) ?? null,
+    };
   });
 }
 
@@ -1596,3 +1806,4 @@ export async function getFinanceReport(
     }));
   });
 }
+

@@ -13,15 +13,19 @@
 //   PATCH  /api/finance/vendors/:publicId
 //   DELETE /api/finance/vendors/:publicId
 //   GET    /api/finance/vendors/:publicId/ledger
+//   GET    /api/finance/vendors/:publicId/ledger/pdf     (statement of account PDF)
 //   GET    /api/finance/invoices
 //   POST   /api/finance/invoices
 //   GET    /api/finance/invoices/:publicId
+//   GET    /api/finance/invoices/:publicId/pdf       (invoice / credit note PDF)
 //   PATCH  /api/finance/invoices/:publicId
 //   DELETE /api/finance/invoices/:publicId
 //   GET    /api/finance/customers/:publicId/ledger
+//   GET    /api/finance/customers/:publicId/ledger/pdf  (statement of account PDF)
 //   GET    /api/finance/vendor-bills
 //   POST   /api/finance/vendor-bills
 //   GET    /api/finance/vendor-bills/:publicId
+//   GET    /api/finance/vendor-bills/:publicId/pdf   (vendor bill PDF)
 //   PATCH  /api/finance/vendor-bills/:publicId
 //   DELETE /api/finance/vendor-bills/:publicId
 //   GET    /api/finance/payments
@@ -37,6 +41,8 @@ import { Router, type Request, type Response } from "express";
 import { asyncHandler } from "../../lib/http.js";
 import { requireStaff, requirePermission } from "../../middleware/auth.js";
 import { isStaff } from "../auth/types.js";
+import { htmlToPdf } from "../documents/pdf.js";
+import { invoiceHtml, vendorBillHtml, ledgerHtml } from "./templates.js";
 import {
   createVendorSchema, updateVendorSchema,
   createInvoiceSchema, updateInvoiceSchema,
@@ -56,6 +62,7 @@ listVendors, createVendor, updateVendor, deleteVendor, hardDeleteVendor, getVend
   listExpenses, createExpense, updateExpense, deleteExpense,
   listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,
   getFinanceDashboard, getFinanceReport,
+  getCustomerHeaderInfo, getVendorHeaderInfo,
 } from "./queries.js";
 
 export const financeRouter: Router = Router();
@@ -252,6 +259,36 @@ financeRouter.get(
   }),
 );
 
+financeRouter.get(
+  "/vendors/:publicId/ledger/pdf",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const publicIdArg = param(req.params.publicId);
+      const [ledger, info] = await Promise.all([
+        getVendorLedger(req.db!, publicIdArg),
+        getVendorHeaderInfo(req.db!, publicIdArg),
+      ]);
+      const contactLine = [info.contactName, info.phone, info.email].filter(Boolean).join(" · ");
+      const html = ledgerHtml({
+        kind: "vendor",
+        partyName: info.name,
+        contactLine: contactLine || info.address,
+        branchName: info.branchName,
+        branchCity: info.branchCity,
+        entries: ledger.entries,
+        closingBalance: ledger.closingBalance,
+      });
+      const pdf = await htmlToPdf(html, { format: "A4" });
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-disposition", `inline; filename="VendorStatement-${publicIdArg}.pdf"`);
+      return res.end(pdf);
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
 // ── Invoices (AR) ───────────────────────────────────────────────────────────
 financeRouter.get(
   "/invoices",
@@ -272,6 +309,25 @@ financeRouter.get(
     try {
       const invoice = await getInvoice(req.db!, param(req.params.publicId));
       return res.json({ invoice });
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
+financeRouter.get(
+  "/invoices/:publicId/pdf",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const invoice = await getInvoice(req.db!, param(req.params.publicId));
+      if (invoice.isCreditNote) {
+        return res.status(400).json({ error: "Credit notes don't have a PDF — only debit invoices do" });
+      }
+      const pdf = await htmlToPdf(invoiceHtml(invoice), { format: "A4" });
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-disposition", `inline; filename="Invoice-${invoice.invoiceNo}.pdf"`);
+      return res.end(pdf);
     } catch (err) {
       return handleFinanceError(err, res);
     }
@@ -342,6 +398,36 @@ financeRouter.get(
   }),
 );
 
+financeRouter.get(
+  "/customers/:publicId/ledger/pdf",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const publicIdArg = param(req.params.publicId);
+      const [ledger, info] = await Promise.all([
+        getCustomerLedger(req.db!, publicIdArg),
+        getCustomerHeaderInfo(req.db!, publicIdArg),
+      ]);
+      const contactLine = [info.email, info.phone].filter(Boolean).join(" · ");
+      const html = ledgerHtml({
+        kind: "customer",
+        partyName: info.name,
+        contactLine,
+        branchName: info.branchName,
+        branchCity: info.branchCity,
+        entries: ledger.entries,
+        closingBalance: ledger.closingBalance,
+      });
+      const pdf = await htmlToPdf(html, { format: "A4" });
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-disposition", `inline; filename="CustomerStatement-${publicIdArg}.pdf"`);
+      return res.end(pdf);
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
 // ── Vendor Bills (AP) ───────────────────────────────────────────────────────
 financeRouter.get(
   "/vendor-bills",
@@ -362,6 +448,22 @@ financeRouter.get(
     try {
       const bill = await getVendorBill(req.db!, param(req.params.publicId));
       return res.json({ bill });
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
+financeRouter.get(
+  "/vendor-bills/:publicId/pdf",
+  requireStaff, requirePermission("finance.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const bill = await getVendorBill(req.db!, param(req.params.publicId));
+      const pdf = await htmlToPdf(vendorBillHtml(bill), { format: "A4" });
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-disposition", `inline; filename="VendorBill-${bill.billNo ?? bill.publicId}.pdf"`);
+      return res.end(pdf);
     } catch (err) {
       return handleFinanceError(err, res);
     }
