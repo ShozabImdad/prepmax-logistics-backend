@@ -268,6 +268,17 @@ export async function addComplaintMessage(
     return message;
   });
 }
+/** SUPER ADMIN: permanently delete a complaint (and its message thread via FK cascade). */
+export async function deleteComplaint(run: Run, complaintPublicId: string): Promise<void> {
+  return run(async (sql) => {
+    const { rows } = await sql.query<{ id: string }>(
+      "DELETE FROM complaints WHERE public_id = $1 RETURNING id",
+      [complaintPublicId],
+    );
+    if (!rows[0]) throw new ComplaintError(404, "Complaint not found");
+  });
+}
+
 /** Verifies a complaint belongs to the given customer. Used by portal routes only. */
 export async function verifyComplaintOwnership(
   run: Run,

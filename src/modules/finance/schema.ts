@@ -3,7 +3,11 @@
 // All amounts are numeric(12,2); Zod coerces to JS number.
 
 import { z } from "zod";
-
+const MAX_MONEY = 9999999999.99;
+const money = (extra?: (s: z.ZodNumber) => z.ZodNumber) => {
+  let s = z.number().max(MAX_MONEY, "Amount is too large");
+  return extra ? extra(s) : s;
+};
 // ── Vendors ────────────────────────────────────────────────────────────────
 export const vendorTypeSchema = z.enum(["carrier", "local", "other"]);
 export type VendorType = z.infer<typeof vendorTypeSchema>;
@@ -17,7 +21,7 @@ export const createVendorSchema = z.object({
   phone: z.string().max(60).optional(),
   email: z.string().email().max(200).optional().or(z.literal("")),
   address: z.string().max(500).optional(),
-  openingBalance: z.number().nonnegative().default(0),
+openingBalance: money((s) => s.nonnegative()).default(0),
   isActive: z.boolean().default(true),
 });
 export type CreateVendorInput = z.infer<typeof createVendorSchema>;
@@ -31,8 +35,8 @@ export type InvoiceStatus = z.infer<typeof invoiceStatusSchema>;
 
 export const invoiceItemSchema = z.object({
   description: z.string().min(1).max(500),
-  quantity: z.number().positive().default(1),
-  unitPrice: z.number().nonnegative().default(0),
+  quantity: z.number().positive().max(1000000, "Quantity is too large").default(1),
+  unitPrice: money((s) => s.nonnegative()).default(0),
 });
 export type InvoiceItemInput = z.infer<typeof invoiceItemSchema>;
 
@@ -48,8 +52,8 @@ export const createInvoiceSchema = z.object({
   issueDate: z.string().optional(),                  // ISO date YYYY-MM-DD
   dueDate: z.string().optional(),
   currency: z.string().max(3).default("PKR"),
-  items: z.array(invoiceItemSchema).min(1, "At least one line item is required"),
-  tax: z.number().nonnegative().default(0),
+ items: z.array(invoiceItemSchema).min(1, "At least one line item is required"),
+  tax: money((s) => s.nonnegative()).default(0),
   notes: z.string().max(2000).optional(),
   status: invoiceStatusSchema.default("unpaid"),
 });
@@ -63,8 +67,8 @@ export const updateInvoiceSchema = z.object({
   issueDate: z.string().optional(),
   dueDate: z.string().optional().nullable(),
   currency: z.string().max(3).optional(),
-  items: z.array(invoiceItemSchema).optional(),
-  tax: z.number().nonnegative().optional(),
+items: z.array(invoiceItemSchema).optional(),
+  tax: money((s) => s.nonnegative()).optional(),
   notes: z.string().max(2000).optional().nullable(),
   status: invoiceStatusSchema.optional(),
 });
@@ -77,7 +81,7 @@ export type VendorBillStatus = z.infer<typeof vendorBillStatusSchema>;
 export const vendorBillItemSchema = z.object({
   orderPublicId: z.string().optional(),
   description: z.string().min(1).max(500),
-  amount: z.number().nonnegative().default(0),
+  amount: money((s) => s.nonnegative()).default(0),
 });
 export type VendorBillItemInput = z.infer<typeof vendorBillItemSchema>;
 
@@ -89,7 +93,7 @@ export const createVendorBillSchema = z.object({
   dueDate: z.string().optional(),
   currency: z.string().max(3).default("PKR"),
   items: z.array(vendorBillItemSchema).default([]),
-  tax: z.number().nonnegative().default(0),
+  tax: money((s) => s.nonnegative()).default(0),
   notes: z.string().max(2000).optional(),
   status: vendorBillStatusSchema.default("unpaid"),
 });
@@ -101,8 +105,8 @@ export const updateVendorBillSchema = z.object({
   billDate: z.string().optional(),
   dueDate: z.string().optional().nullable(),
   currency: z.string().max(3).optional(),
-  items: z.array(vendorBillItemSchema).optional(),
-  tax: z.number().nonnegative().optional(),
+ items: z.array(vendorBillItemSchema).optional(),
+  tax: money((s) => s.nonnegative()).optional(),
   notes: z.string().max(2000).optional().nullable(),
   status: vendorBillStatusSchema.optional(),
 });
@@ -117,8 +121,8 @@ export const createBankAccountSchema = z.object({
   name: z.string().min(1, "Name is required").max(200),
   accountType: bankAccountTypeSchema.default("bank"),
   bankName: z.string().max(200).optional(),
-  accountNumber: z.string().max(100).optional(),
-  openingBalance: z.number().default(0),
+accountNumber: z.string().max(100).optional(),
+  openingBalance: z.number().min(-MAX_MONEY).max(MAX_MONEY, "Amount is too large").default(0),
   isActive: z.boolean().default(true),
 });
 export type CreateBankAccountInput = z.infer<typeof createBankAccountSchema>;
@@ -140,7 +144,7 @@ export const createPaymentSchema = z.object({
   // When provided, this takes precedence and `account` is derived from it
   // so the legacy text column and the specific account never disagree.
   bankAccountPublicId: z.string().optional(),
-  amount: z.number().positive("Amount must be > 0"),
+amount: money((s) => s.positive("Amount must be > 0")),
   paidOn: z.string().optional(),                       // ISO date
   customerPublicId: z.string().optional(),
   vendorPublicId: z.string().optional(),
@@ -163,7 +167,7 @@ export type ExpenseCategory = z.infer<typeof expenseCategorySchema>;
 export const createExpenseSchema = z.object({
   branchPublicId: z.string().optional(),  // required for super_admin
   category: expenseCategorySchema,
-  amount: z.number().positive("Amount must be > 0"),
+   amount: z.number().positive("Amount must be > 0").max(9999999999.99, "Amount too large"),
   account: paymentAccountSchema.default("cash_in_hand"),
   // Same precedence rule as payments — see createPaymentSchema.
   bankAccountPublicId: z.string().optional(),

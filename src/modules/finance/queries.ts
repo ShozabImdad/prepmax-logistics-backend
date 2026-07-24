@@ -1480,11 +1480,12 @@ export async function getCustomerLedger(run: Run, customerPublicId: string): Pro
          FROM invoices i
          LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
         WHERE i.customer_id = $1 AND i.status <> 'void'
-        UNION ALL
-       SELECT p.paid_on AS dt, p.reference AS ref,
-              COALESCE(NULLIF(p.notes,''), 'Payment received') AS descr,
+     UNION ALL
+       SELECT p.paid_on AS dt, COALESCE(i.invoice_no, '') AS ref,
+              COALESCE(NULLIF(p.reference,''), NULLIF(p.notes,''), 'Payment received') AS descr,
               0 AS debit, p.amount AS credit
          FROM payments p
+         LEFT JOIN invoices i ON i.id = p.invoice_id
         WHERE p.customer_id = $1 AND p.direction = 'in'
         ORDER BY dt ASC, ref ASC`,
       [custRows[0].id],
@@ -1522,11 +1523,12 @@ export async function getVendorLedger(run: Run, vendorPublicId: string): Promise
               0 AS debit, vb.total AS credit
          FROM vendor_bills vb
         WHERE vb.vendor_id = $1 AND vb.status <> 'void'
-        UNION ALL
-       SELECT p.paid_on AS dt, p.reference AS ref,
-              COALESCE(NULLIF(p.notes,''), 'Payment made') AS descr,
+      UNION ALL
+       SELECT p.paid_on AS dt, COALESCE(vb.bill_no, '') AS ref,
+              COALESCE(NULLIF(p.reference,''), NULLIF(p.notes,''), 'Payment made') AS descr,
               p.amount AS debit, 0 AS credit
          FROM payments p
+         LEFT JOIN vendor_bills vb ON vb.id = p.vendor_bill_id
         WHERE p.vendor_id = $1 AND p.direction = 'out'
         ORDER BY dt ASC, ref ASC`,
       [vRows[0].id],

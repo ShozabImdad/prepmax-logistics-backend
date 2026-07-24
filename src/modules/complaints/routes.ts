@@ -11,7 +11,7 @@ import { requireStaff, requireCustomer, requirePermission } from "../../middlewa
 import { isStaff, isCustomer } from "../auth/types.js";
 import { createComplaintSchema, updateComplaintSchema } from "./schema.js";
 import {
-  createComplaint, listComplaints, listCustomerComplaints, updateComplaint,
+  createComplaint, listComplaints, listCustomerComplaints, updateComplaint, deleteComplaint,
   listComplaintMessages, addComplaintMessage, verifyComplaintOwnership, ComplaintError,
 } from "./queries.js";
 import { createBranchNotification } from "../notifications/service.js";
@@ -160,6 +160,30 @@ complaintRouter.patch(
     }
   }),
 );
+// ── SUPER ADMIN: delete a complaint ─────────────────────────────────────────
+// Gated by both the normal permission (branch-scoped RLS still applies via
+// req.db) AND a super-admin role check, since this is a hard delete.
+complaintRouter.delete(
+  "/:publicId",
+  requireStaff,
+  requirePermission("complaints.manage"),
+  asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    if (staff.role !== "super_admin") {
+      return res.status(403).json({ error: "Super admin only" });
+    }
+    try {
+      await deleteComplaint(req.db!, param(req.params.publicId));
+      // 200 + JSON body (not bare 204) — the BFF proxy relays every backend
+      // response through .json(), which throws on an empty 204 body.
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      return handleComplaintError(err, res);
+    }
+  }),
+);
+
 complaintRouter.get(
   "/:publicId/messages",
   requireStaff,

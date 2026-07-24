@@ -267,6 +267,17 @@ export async function addQuoteMessage(
     return message;
   });
 }
+/** SUPER ADMIN: permanently delete a quote (and its message thread via FK cascade). */
+export async function deleteQuote(run: Run, quotePublicId: string): Promise<void> {
+  return run(async (sql) => {
+    const { rows } = await sql.query<{ id: string }>(
+      "DELETE FROM quotes WHERE public_id = $1 RETURNING id",
+      [quotePublicId],
+    );
+    if (!rows[0]) throw new QuoteError(404, "Quote not found");
+  });
+}
+
 export async function verifyQuoteOwnership(
   run: Run,
   quotePublicId: string,

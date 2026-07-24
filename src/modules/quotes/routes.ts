@@ -11,7 +11,7 @@ import { requireStaff, requireCustomer, requirePermission } from "../../middlewa
 import { isStaff, isCustomer } from "../auth/types.js";
 import { createQuoteSchema, updateQuoteSchema } from "./schema.js";
 import {
-  createQuote, listQuotes, listCustomerQuotes, updateQuote,
+  createQuote, listQuotes, listCustomerQuotes, updateQuote, deleteQuote,
   listQuoteMessages, addQuoteMessage, verifyQuoteOwnership, QuoteError,
 } from "./queries.js";
 
@@ -136,6 +136,30 @@ quoteRouter.patch(
     }
   }),
 );
+// ── SUPER ADMIN: delete a quote ─────────────────────────────────────────────
+// Gated by both the normal permission (branch-scoped RLS still applies via
+// req.db) AND a super-admin role check, since this is a hard delete.
+quoteRouter.delete(
+  "/:publicId",
+  requireStaff,
+  requirePermission("quotes.manage"),
+  asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    if (staff.role !== "super_admin") {
+      return res.status(403).json({ error: "Super admin only" });
+    }
+    try {
+      await deleteQuote(req.db!, param(req.params.publicId));
+      // 200 + JSON body (not bare 204) — the BFF proxy relays every backend
+      // response through .json(), which throws on an empty 204 body.
+      return res.status(200).json({ ok: true });
+    } catch (err) {
+      return handleQuoteError(err, res);
+    }
+  }),
+);
+
 quoteRouter.get(
   "/:publicId/messages",
   requireStaff,
