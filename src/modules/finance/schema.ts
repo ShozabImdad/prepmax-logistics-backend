@@ -153,8 +153,17 @@ amount: money((s) => s.positive("Amount must be > 0")),
   reference: z.string().max(200).optional(),
   notes: z.string().max(2000).optional(),
 }).refine(
-  (v) => (v.direction === "in" && v.customerPublicId) || (v.direction === "out"),
-  { message: "Inbound payments should reference a customer" },
+  (v) => v.direction !== "in" || !!v.customerPublicId,
+  { message: "Inbound payments must reference a customer", path: ["customerPublicId"] },
+).refine(
+  (v) => v.direction !== "out" || !!v.vendorPublicId,
+  { message: "Outbound payments must reference a vendor", path: ["vendorPublicId"] },
+).refine(
+  (v) => !v.invoicePublicId || v.direction === "in",
+  { message: "invoicePublicId can only be set on inbound payments", path: ["invoicePublicId"] },
+).refine(
+  (v) => !v.vendorBillPublicId || v.direction === "out",
+  { message: "vendorBillPublicId can only be set on outbound payments", path: ["vendorBillPublicId"] },
 );
 export type CreatePaymentInput = z.infer<typeof createPaymentSchema>;
 

@@ -25,8 +25,9 @@ import {
   ManifestError,
   listManifests, getManifest, createManifest, updateManifest, deleteManifest,
   addShipments, removeShipment, closeManifest, dispatchManifest, searchEligibleOrders,
+  getManifestCustomerInfo,
 } from "./queries.js";
-
+import { createCustomerNotification } from "../notifications/service.js";
 export const manifestRouter: Router = Router(); // staff: /api/manifests
 
 function handleManifestError(err: unknown, res: Response): void {
@@ -141,7 +142,20 @@ manifestRouter.patch(
     const parsed = updateManifestSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid update", details: parsed.error.flatten() });
     try {
-      const manifest = await updateManifest(req.db!, param(req.params.publicId), parsed.data);
+      const pid = param(req.params.publicId);
+      const custInfo = await getManifestCustomerInfo(req.db!, pid);
+      const manifest = await updateManifest(req.db!, pid, parsed.data);
+      if (custInfo) {
+        try {
+          await createCustomerNotification(req.db!, custInfo.branchId, {
+            customerId: custInfo.customerId,
+            type: "manifest_updated",
+            message: `Your manifest ${custInfo.manifestNo} was updated by staff.`,
+          });
+        } catch (err) {
+          console.error("[manifests] customer notification failed:", err);
+        }
+      }
       return res.json({ manifest });
     } catch (err) {
       return handleManifestError(err, res);
@@ -187,7 +201,20 @@ manifestRouter.post(
     const staff = req.auth!;
     if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
     try {
-      const manifest = await closeManifest(req.db!, param(req.params.publicId), staff.userId);
+      const pid = param(req.params.publicId);
+      const custInfo = await getManifestCustomerInfo(req.db!, pid);
+      const manifest = await closeManifest(req.db!, pid, staff.userId);
+      if (custInfo) {
+        try {
+          await createCustomerNotification(req.db!, custInfo.branchId, {
+            customerId: custInfo.customerId,
+            type: "manifest_closed",
+            message: `Your manifest ${custInfo.manifestNo} was closed by staff and can no longer be edited.`,
+          });
+        } catch (err) {
+          console.error("[manifests] customer notification failed:", err);
+        }
+      }
       return res.json({ manifest });
     } catch (err) {
       return handleManifestError(err, res);
@@ -200,7 +227,20 @@ manifestRouter.delete(
   requireStaff, requirePermission("manifest.manage"),
   asyncHandler(async (req, res) => {
     try {
-      await deleteManifest(req.db!, param(req.params.publicId));
+      const pid = param(req.params.publicId);
+      const custInfo = await getManifestCustomerInfo(req.db!, pid);
+      await deleteManifest(req.db!, pid);
+      if (custInfo) {
+        try {
+          await createCustomerNotification(req.db!, custInfo.branchId, {
+            customerId: custInfo.customerId,
+            type: "manifest_deleted",
+            message: `Your manifest ${custInfo.manifestNo} was deleted by staff.`,
+          });
+        } catch (err) {
+          console.error("[manifests] customer notification failed:", err);
+        }
+      }
       return res.json({ ok: true });
     } catch (err) {
       return handleManifestError(err, res);
@@ -215,7 +255,20 @@ manifestRouter.post(
   requireStaff, requirePermission("manifest.manage"),
   asyncHandler(async (req, res) => {
     try {
-      const manifest = await dispatchManifest(req.db!, param(req.params.publicId));
+      const pid = param(req.params.publicId);
+      const custInfo = await getManifestCustomerInfo(req.db!, pid);
+      const manifest = await dispatchManifest(req.db!, pid);
+      if (custInfo) {
+        try {
+          await createCustomerNotification(req.db!, custInfo.branchId, {
+            customerId: custInfo.customerId,
+            type: "manifest_dispatched",
+            message: `Your manifest ${custInfo.manifestNo} has been dispatched.`,
+          });
+        } catch (err) {
+          console.error("[manifests] customer notification failed:", err);
+        }
+      }
       return res.json({ manifest });
     } catch (err) {
       return handleManifestError(err, res);

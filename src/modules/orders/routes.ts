@@ -127,8 +127,9 @@ orderRouter.post(
   requireStaff,
   requirePermission("orders.cancel"),
   asyncHandler(async (req, res) => {
-    try {
-      await cancelOrder(req.db!, param(req.params.publicId));
+   try {
+      const { orderId, branchId } = await cancelOrder(req.db!, param(req.params.publicId));
+      emitEvent({ kind: "order_cancelled", orderId, branchId });
       return res.json({ ok: true, orderStatus: "cancelled" });
     } catch (err) {
       return handleOrderError(err, res);

@@ -36,6 +36,7 @@ authRouter.post(
         email: p.email,
         fullName: p.fullName,
         permissions: isStaff(p) ? [...p.permissions] : undefined,
+        roleNames: isStaff(p) ? p.roleNames : undefined,
       },
     });
   }),
@@ -88,6 +89,7 @@ authRouter.get(
         email: p.email,
         fullName: p.fullName,
         permissions: isStaff(p) ? [...p.permissions] : undefined,
+        roleNames: isStaff(p) ? p.roleNames : undefined,
       },
     });
   }),

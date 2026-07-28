@@ -10,6 +10,7 @@ import { accountsRouter } from "./modules/accounts/routes.js";
 import { orderRouter, portalOrderRouter } from "./modules/orders/routes.js";
 import { documentRouter, portalDocumentRouter } from "./modules/documents/routes.js";
 import { notificationRouter } from "./modules/notifications/routes.js";
+import { portalNotificationRouter } from "./modules/notifications/portal-routes.js";
 import { publicTrackingRouter } from "./modules/tracking/routes.js";
 import { publicAccountRequestRouter, accountRequestRouter } from "./modules/account-requests/routes.js";
 import { permissionsRouter } from "./modules/permissions/routes.js";
@@ -48,6 +49,7 @@ export function createApp() {
   app.use("/api/portal/orders", portalOrderRouter);
   app.use("/api/portal/orders", portalDocumentRouter); // /:publicId/receipt.pdf
   app.use("/api/notifications", notificationRouter);
+  app.use("/api/portal/notifications", portalNotificationRouter);
   app.use("/api/account-requests", accountRequestRouter); // staff GET/status (public POST mounted above)
   app.use("/api/permissions", permissionsRouter);
   app.use("/api/staff", staffRouter);

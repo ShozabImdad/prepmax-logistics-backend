@@ -12,6 +12,7 @@ export interface StaffPrincipal {
   email: string;
   fullName: string;
   permissions: Set<string>;   // effective permission keys (super_admin = all)
+  roleNames: string[];        // names of RBAC roles assigned via user_roles (e.g. ["Dispatcher"])
 }
 
 export interface CustomerPrincipal {

@@ -269,9 +269,16 @@ export function awbHtml(d: DocData, barcode: string): string {
 // ============================================================================
 export function receiptHtml(d: DocData, barcode: string): string {
   
-  const pkgRows = d.boxes.map((b, i) => `<tr>
-      ...
-    </tr>`).join("");
+  const pkgRows = d.boxes.map((b, i) => {
+    const contents = b.items.map((it) => esc(it.description)).filter(Boolean).join(", ") || (b.label ? esc(b.label) : "—");
+    return `<tr>
+      <td>${i + 1}</td>
+      <td>${contents}</td>
+      <td class="num">${b.weightKg.toFixed(2)}</td>
+      <td class="num">${b.lengthCm} × ${b.widthCm} × ${b.heightCm}</td>
+      <td class="num">${b.chargeableKg.toFixed(2)}</td>
+    </tr>`;
+  }).join("");
 
   const declared = d.declaredValue != null ? `${d.declaredValue.toFixed(2)} ${esc(d.currency ?? "")}` : "—";
   const priceLine = d.price != null

@@ -50,12 +50,13 @@ export async function approveOrder(run: Run, orderPublicId: string, approverUser
 }
 
 /** Cancel an order. */
-export async function cancelOrder(run: Run, orderPublicId: string): Promise<void> {
-  await run(async (sql) => {
+export async function cancelOrder(run: Run, orderPublicId: string): Promise<{ orderId: string; branchId: string }> {
+  return run(async (sql) => {
     const order = await findOrderIdByPublicId(sql, orderPublicId);
     if (!order) throw new OrderError(404, "Order not found");
     if (order.order_status === "delivered") throw new OrderError(409, "Delivered orders cannot be cancelled");
     await sql.query("UPDATE orders SET order_status = 'cancelled' WHERE id = $1", [order.id]);
+    return { orderId: order.id, branchId: order.branch_id };
   });
 }
 
@@ -170,11 +171,22 @@ export async function editOrder(
       await sql.query(`UPDATE orders SET ${set.join(", ")} WHERE id = $${vals.length}`, vals);
     }
 
-    // Replace boxes + items if provided.
+  // Replace boxes + items if provided.
     if (input.boxes) {
       const divisor = await branchDivisor(sql, order.branch_id, divisorFallback);
       await sql.query("DELETE FROM boxes WHERE order_id = $1", [order.id]); // cascades items
       await insertBoxesAndItems(sql, order.id, order.branch_id, input.boxes, divisor);
+
+      // Box weights just changed — any manifest this order is already sitting
+      // on has a stale cached total_weight_kg (recomputeTotals is normally
+      // only triggered by add/remove-shipment events, not by order edits).
+      const { rows: onManifests } = await sql.query<{ manifest_id: string }>(
+        "SELECT DISTINCT manifest_id FROM manifest_shipments WHERE order_id = $1",
+        [order.id],
+      );
+      for (const { manifest_id } of onManifests) {
+        await recomputeTotals(sql, manifest_id);
+      }
     }
   });
 }

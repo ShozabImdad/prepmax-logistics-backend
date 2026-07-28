@@ -20,11 +20,11 @@ const SUPER_NAME = process.env.SEED_SUPERADMIN_NAME ?? "Super Admin";
 // The permission keys a default branch-manager role should hold. Super-admin
 // implicitly has all; this is the starting toggle set for managers.
 const MANAGER_PERMISSIONS = [
-  "orders.view", "orders.create", "orders.edit", "orders.approve", "orders.cancel",
+  "orders.view", "orders.create", "orders.edit", "orders.approve", "orders.cancel", "orders.delete",
   "tracking.view", "tracking.manage",
-  "customers.view", "customers.create", "customers.edit",
+  "customers.view", "customers.create", "customers.edit", "customers.delete",
   "documents.print", "reports.view",
-  "complaints.manage",
+  "complaints.manage", "quotes.manage", "finance.manage", "manifest.manage", "demanifest.manage",
 ];
 
 async function run(): Promise<void> {
@@ -58,22 +58,37 @@ async function run(): Promise<void> {
       "SELECT id FROM roles WHERE branch_id IS NULL AND name = 'Branch Manager'",
     );
     if (role.rows[0]) {
+      // Role already exists — leave its permissions alone. An admin may have
+      // customized them via the permissions toggle page since seeding, and
+      // re-running this script (e.g. on redeploy) must not silently wipe
+      // that out. Just top up any keys the role is missing from the default
+      // set, without touching anything the admin added or removed.
       roleId = role.rows[0].id;
+      const applied = await client.query(
+        `INSERT INTO role_permissions (role_id, permission_id)
+           SELECT $1, id FROM permissions
+            WHERE key = ANY($2)
+              AND id NOT IN (SELECT permission_id FROM role_permissions WHERE role_id = $1)`,
+        [roleId, MANAGER_PERMISSIONS],
+      );
+      if ((applied.rowCount ?? 0) > 0) {
+        console.log(`Topped up ${applied.rowCount} missing default permission(s) on existing 'Branch Manager' role.`);
+      } else {
+        console.log("'Branch Manager' role already exists — permissions left as-is.");
+      }
     } else {
       const r = await client.query<{ id: string }>(
         "INSERT INTO roles (branch_id, name, is_system) VALUES (NULL, 'Branch Manager', true) RETURNING id",
       );
       roleId = r.rows[0]!.id;
       console.log("Created default 'Branch Manager' role.");
+      await client.query(
+        `INSERT INTO role_permissions (role_id, permission_id)
+           SELECT $1, id FROM permissions WHERE key = ANY($2)`,
+        [roleId, MANAGER_PERMISSIONS],
+      );
+      console.log(`Applied ${MANAGER_PERMISSIONS.length} default permissions to new 'Branch Manager' role.`);
     }
-    // (re)apply the permission set
-    await client.query("DELETE FROM role_permissions WHERE role_id = $1", [roleId]);
-    await client.query(
-      `INSERT INTO role_permissions (role_id, permission_id)
-         SELECT $1, id FROM permissions WHERE key = ANY($2)`,
-      [roleId, MANAGER_PERMISSIONS],
-    );
-    console.log(`Applied ${MANAGER_PERMISSIONS.length} permissions to 'Branch Manager' role.`);
 
     console.log("\nSeed complete.");
   } finally {

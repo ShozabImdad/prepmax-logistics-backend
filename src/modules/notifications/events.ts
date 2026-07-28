@@ -15,7 +15,7 @@ import { pool } from "../../db/pool.js";
 import type { Sql } from "../../db/pool.js";
 import { sendEmail } from "./mailer.js";
 import { renderCustomerEmail, type CustomerEmailTemplate } from "./email-templates.js";
-import { createBranchNotification, logEmail } from "./service.js";
+import { createBranchNotification, createCustomerNotification, logEmail } from "./service.js";
 
 // ── Event types ─────────────────────────────────────────────────────────────
 export type DomainEvent =
@@ -23,7 +23,8 @@ export type DomainEvent =
   | { kind: "order_approved"; orderId: string; branchId: string }
   | { kind: "order_activated"; orderId: string; branchId: string }
   | { kind: "order_delivered"; orderId: string; branchId: string }
-  | { kind: "order_exception"; orderId: string; branchId: string; statusText: string };
+  | { kind: "order_exception"; orderId: string; branchId: string; statusText: string }
+  | { kind: "order_cancelled"; orderId: string; branchId: string };
 
 interface QueueItem {
   event: DomainEvent;
@@ -135,6 +136,26 @@ async function emailCustomer(
   );
 }
 
+// Create a customer-portal in-app notification (best-effort; no-op if the
+// order has no attached customer). Mirrors emailCustomer's shape/logging.
+async function notifyCustomerPortal(
+  branchId: string,
+  info: OrderInfo,
+  type: string,
+  message: string,
+  orderId: string,
+): Promise<void> {
+  if (!info.customerId) return; // no customer attached to this order
+  await withBranch(branchId, (sql) =>
+    createCustomerNotification((fn) => fn(sql), branchId, {
+      customerId: info.customerId!,
+      type,
+      message,
+      orderId,
+    }),
+  );
+}
+
 // ── Event handling (the actual notification/email work) ─────────────────────
 async function handleEvent(event: DomainEvent): Promise<void> {
   switch (event.kind) {
@@ -158,23 +179,43 @@ async function handleEvent(event: DomainEvent): Promise<void> {
       }
       return;
     }
-    case "order_approved":
+    case "order_approved": {
+      const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
+      if (!info) return;
+      await emailCustomer(event.branchId, event.orderId, info, "order_confirmed");
+      await notifyCustomerPortal(
+        event.branchId, info, "order_approved",
+        `Your booking ${info.trackingCode} has been approved and is awaiting carrier assignment.`,
+        event.orderId,
+      );
+      return;
+    }
     case "order_activated": {
       const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
       if (!info) return;
       await emailCustomer(event.branchId, event.orderId, info, "order_confirmed");
+      await notifyCustomerPortal(
+        event.branchId, info, "order_activated",
+        `Your shipment ${info.trackingCode} is now trackable.`,
+        event.orderId,
+      );
       return;
     }
     case "order_delivered": {
       const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
       if (!info) return;
       await emailCustomer(event.branchId, event.orderId, info, "delivered");
+      await notifyCustomerPortal(
+        event.branchId, info, "order_delivered",
+        `Your shipment ${info.trackingCode} has been delivered.`,
+        event.orderId,
+      );
       return;
     }
     case "order_exception": {
       const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
       if (!info) return;
-      // Admin alert + customer email.
+      // Admin alert + customer email + customer in-app notification.
       await withBranch(event.branchId, (sql) =>
         createBranchNotification((fn) => fn(sql), event.branchId, {
           type: "exception",
@@ -183,6 +224,22 @@ async function handleEvent(event: DomainEvent): Promise<void> {
         }),
       );
       await emailCustomer(event.branchId, event.orderId, info, "exception", event.statusText);
+      await notifyCustomerPortal(
+        event.branchId, info, "order_exception",
+        `There's an update on your shipment ${info.trackingCode}: ${event.statusText}`,
+        event.orderId,
+      );
+      return;
+    }
+    case "order_cancelled": {
+      const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
+      if (!info) return;
+      await emailCustomer(event.branchId, event.orderId, info, "cancelled");
+      await notifyCustomerPortal(
+        event.branchId, info, "order_cancelled",
+        `Your shipment ${info.trackingCode} has been cancelled.`,
+        event.orderId,
+      );
       return;
     }
   }

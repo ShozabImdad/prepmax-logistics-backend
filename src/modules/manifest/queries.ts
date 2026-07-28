@@ -208,6 +208,28 @@ async function fetchManifestBySql(
   return { ...manifest, shipments: shipRows.map(mapShipment) };
 }
 
+// For staff routes that need to notify a customer after modifying their
+// manifest (close/dispatch/delete/update). Returns null if this manifest
+// wasn't created by a customer, or doesn't exist.
+export interface ManifestCustomerInfo {
+  customerId: string;
+  branchId: string;
+  manifestNo: string;
+}
+export async function getManifestCustomerInfo(
+  run: Run,
+  publicIdArg: string,
+): Promise<ManifestCustomerInfo | null> {
+  return run(async (sql) => {
+    const { rows } = await sql.query<{ customer_id: string | null; branch_id: string; manifest_no: string }>(
+      "SELECT created_by_customer_id AS customer_id, branch_id, manifest_no FROM manifests WHERE public_id = $1",
+      [publicIdArg],
+    );
+    if (!rows[0] || !rows[0].customer_id) return null;
+    return { customerId: rows[0].customer_id, branchId: rows[0].branch_id, manifestNo: rows[0].manifest_no };
+  });
+}
+
 export async function getManifest(
   run: Run,
   publicIdArg: string,
@@ -296,12 +318,23 @@ export async function addShipments(
     const branchId = mRows[0].branch_id;
 
     for (const orderPublicId of orderPublicIds) {
-      const { rows: orderRows } = await sql.query<{ id: string }>(
-        "SELECT id FROM orders WHERE public_id = $1",
+      const { rows: orderRows } = await sql.query<{ id: string; order_status: string }>(
+        "SELECT id, order_status FROM orders WHERE public_id = $1",
         [orderPublicId],
       );
       if (!orderRows[0]) throw new ManifestError(404, `Order not found: ${orderPublicId}`);
       const orderId = orderRows[0]!.id;
+
+      // Only orders that are ready to ship (or already active) can go on a
+      // manifest — mirrors the eligibility filter used by
+      // searchEligibleOrders(). Enforced here too, not just in that
+      // suggestions endpoint, so a direct API call can't bypass it.
+      if (!["awaiting_carrier", "active"].includes(orderRows[0]!.order_status)) {
+        throw new ManifestError(
+          409,
+          `Order ${orderPublicId} is not eligible for a manifest (status: ${orderRows[0]!.order_status})`,
+        );
+      }
 
       // Cross-manifest duplicate check: an order can't sit on two live
       // (non-dispatched) manifests at once. Row-locked to avoid a race

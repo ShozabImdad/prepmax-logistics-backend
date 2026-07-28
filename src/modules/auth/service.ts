@@ -58,6 +58,20 @@ async function loadPermissions(userId: string, role: StaffRole): Promise<Set<str
   return new Set(keys);
 }
 
+/** Names of the custom RBAC roles assigned to a staff user (via user_roles). */
+async function loadRoleNames(userId: string, role: StaffRole): Promise<string[]> {
+  if (role === "super_admin") return ["Super Admin"];
+  const names = await withoutContext(async (sql) => {
+    const { rows } = await sql.query<{ name: string }>(
+      `SELECT r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
+      [userId],
+    );
+    return rows.map((r) => r.name);
+  });
+  return names;
+}
+
+
 export interface LoginResult {
   sessionId: string;
   principal: Principal;
@@ -77,6 +91,7 @@ export async function loginStaff(email: string, password: string): Promise<Login
   if (!(await verifyPassword(user.password_hash, password))) return null;
 
   const permissions = await loadPermissions(user.id, user.role);
+  const roleNames = await loadRoleNames(user.id, user.role);
   const sessionId = await createUserSession(user.id);
   const principal: StaffPrincipal = {
     kind: "user",
@@ -87,6 +102,7 @@ export async function loginStaff(email: string, password: string): Promise<Login
     email: user.email,
     fullName: user.full_name,
     permissions,
+    roleNames,
   };
   return { sessionId, principal };
 }
@@ -132,8 +148,9 @@ export async function resolvePrincipal(sessionId: string): Promise<Principal | n
       );
       return rows[0] ?? null;
     });
-    if (!user || !user.is_active) return null;
+   if (!user || !user.is_active) return null;
     const permissions = await loadPermissions(user.id, user.role);
+    const roleNames = await loadRoleNames(user.id, user.role);
     return {
       kind: "user",
       userId: user.id,
@@ -143,6 +160,7 @@ export async function resolvePrincipal(sessionId: string): Promise<Principal | n
       email: user.email,
       fullName: user.full_name,
       permissions,
+      roleNames,
     };
   }
 

@@ -237,9 +237,15 @@ export async function updateVendor(run: Run, publicIdArg: string, input: UpdateV
       "SELECT is_protected FROM vendors WHERE public_id = $1",
       [publicIdArg],
     );
-    if (!guardRows[0]) throw new FinanceError(404, "Vendor not found");
-    if (guardRows[0].is_protected) {
-      throw new FinanceError(403, "This vendor is a protected system record and cannot be edited");
+  if (!guardRows[0]) throw new FinanceError(404, "Vendor not found");
+    if (guardRows[0].is_protected && input.name !== undefined) {
+      throw new FinanceError(403, "Name of a protected system vendor cannot be changed");
+    }
+    if (guardRows[0].is_protected && input.vendorType !== undefined) {
+      throw new FinanceError(403, "Vendor type of a protected system vendor cannot be changed");
+    }
+    if (guardRows[0].is_protected && input.isActive === false) {
+      throw new FinanceError(403, "A protected system vendor cannot be deactivated");
     }
 
     const sets: string[] = [];
@@ -272,6 +278,7 @@ export async function deleteVendor(run: Run, publicIdArg: string): Promise<void>
       "SELECT is_protected FROM vendors WHERE public_id = $1",
       [publicIdArg],
     );
+    
     if (!guardRows[0]) throw new FinanceError(404, "Vendor not found");
     if (guardRows[0].is_protected) {
       throw new FinanceError(403, "This vendor is a protected system record and cannot be deactivated");
@@ -280,7 +287,6 @@ export async function deleteVendor(run: Run, publicIdArg: string): Promise<void>
     if (rowCount === 0) throw new FinanceError(404, "Vendor not found");
   });
 }
-
 export async function hardDeleteVendor(run: Run, publicIdArg: string): Promise<{ billsDeleted: number; paymentsDeleted: number }> {
   return run(async (sql) => {
     const { rows } = await sql.query<{ id: string; is_protected: boolean }>(
@@ -293,14 +299,23 @@ export async function hardDeleteVendor(run: Run, publicIdArg: string): Promise<{
     }
     const vendorId = rows[0].id;
 
-    const { rowCount: billsDeleted } = await sql.query(
-      "DELETE FROM vendor_bills WHERE vendor_id = $1",
+    const { rows: manifestCheck } = await sql.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM manifests WHERE vendor_id = $1",
       [vendorId],
     );
-    const { rowCount: paymentsDeleted } = await sql.query(
-      "DELETE FROM payments WHERE vendor_id = $1",
+    if (Number(manifestCheck[0]!.count) > 0) {
+      throw new FinanceError(409, "This vendor is assigned to one or more manifests and cannot be permanently deleted. Deactivate it instead.");
+    }
+    const { rows: deManifestCheck } = await sql.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM de_manifests WHERE vendor_id = $1",
       [vendorId],
     );
+    if (Number(deManifestCheck[0]!.count) > 0) {
+      throw new FinanceError(409, "This vendor is assigned to one or more de-manifests and cannot be permanently deleted. Deactivate it instead.");
+    }
+
+    const { rowCount: billsDeleted } = await sql.query("DELETE FROM vendor_bills WHERE vendor_id = $1", [vendorId]);
+    const { rowCount: paymentsDeleted } = await sql.query("DELETE FROM payments WHERE vendor_id = $1", [vendorId]);
     await sql.query("DELETE FROM vendors WHERE id = $1", [vendorId]);
 
     return { billsDeleted: billsDeleted ?? 0, paymentsDeleted: paymentsDeleted ?? 0 };
@@ -1166,13 +1181,14 @@ export async function createPayment(
       if (!rows[0]) throw new FinanceError(404, "Vendor not found");
       vendorId = rows[0]!.id;
     }
-  if (input.invoicePublicId) {
+ if (input.invoicePublicId) {
       const { rows } = await sql.query<{ id: string; amount_paid: string; total: string; status: string; credited: string }>(
         `SELECT i.id, i.amount_paid, i.total, i.status,
                 COALESCE((SELECT SUM(-cn.total) FROM invoices cn
                            WHERE cn.referenced_invoice_id = i.id
                              AND cn.is_credit_note AND cn.status <> 'void'), 0) AS credited
-           FROM invoices i WHERE i.public_id = $1`,
+           FROM invoices i WHERE i.public_id = $1
+          FOR UPDATE OF i`,
         [input.invoicePublicId],
       );
       if (!rows[0]) throw new FinanceError(404, "Invoice not found");
@@ -1184,12 +1200,15 @@ export async function createPayment(
       }
       invoiceId = rows[0]!.id;
     }
-    if (input.vendorBillPublicId) {
-      const { rows } = await sql.query<{ id: string; amount_paid: string; total: string }>(
-        "SELECT id, amount_paid, total FROM vendor_bills WHERE public_id = $1",
+  if (input.vendorBillPublicId) {
+      const { rows } = await sql.query<{ id: string; amount_paid: string; total: string; vendor_id: string }>(
+        "SELECT id, amount_paid, total, vendor_id FROM vendor_bills WHERE public_id = $1 FOR UPDATE",
         [input.vendorBillPublicId],
       );
       if (!rows[0]) throw new FinanceError(404, "Vendor bill not found");
+      if (!vendorId || rows[0].vendor_id !== vendorId) {
+        throw new FinanceError(400, "This bill does not belong to the selected vendor");
+      }
       const remaining = n(rows[0]!.total) - n(rows[0]!.amount_paid);
       if (input.amount > remaining) {
         throw new FinanceError(400, `Payment amount exceeds remaining bill balance of ${remaining.toFixed(2)}`);
@@ -1646,6 +1665,8 @@ export interface FinanceDashboard {
   totalExpenses: number;
   pendingPayments: number;          // what customers still owe us
   pendingVendorBills: number;       // what we still owe vendors
+  overdueInvoices: { count: number; amount: number };
+  overdueBills: { count: number; amount: number };
   profitLoss: number;
   cashInHand: number;               // all-time, all cash-type accounts combined
   bankBalance: number;              // all-time, all bank-type accounts combined
@@ -1674,6 +1695,15 @@ export async function getFinanceDashboard(run: Run, opts: { from?: string; to?: 
            + COALESCE((SELECT SUM(amount) FROM expenses WHERE spent_on BETWEEN $1 AND $2), 0)::numeric AS total_expenses,
          COALESCE((SELECT SUM(total - amount_paid) FROM invoices WHERE status IN ('unpaid','partial')), 0)::numeric AS pending_ar,
          COALESCE((SELECT SUM(total - amount_paid) FROM vendor_bills WHERE status IN ('unpaid','partial')), 0)::numeric AS pending_ap,
+
+
+
+         COALESCE((SELECT COUNT(*) FROM invoices WHERE status IN ('unpaid','partial') AND due_date IS NOT NULL AND due_date < CURRENT_DATE), 0)::int AS overdue_invoice_count,
+         COALESCE((SELECT SUM(total - amount_paid) FROM invoices WHERE status IN ('unpaid','partial') AND due_date IS NOT NULL AND due_date < CURRENT_DATE), 0)::numeric AS overdue_invoice_amount,
+         COALESCE((SELECT COUNT(*) FROM vendor_bills WHERE status IN ('unpaid','partial') AND due_date IS NOT NULL AND due_date < CURRENT_DATE), 0)::int AS overdue_bill_count,
+         COALESCE((SELECT SUM(total - amount_paid) FROM vendor_bills WHERE status IN ('unpaid','partial') AND due_date IS NOT NULL AND due_date < CURRENT_DATE), 0)::numeric AS overdue_bill_amount,
+
+
 
          -- Cash in Hand: ALL-TIME, opening balances + full history, no date filter.
          COALESCE((SELECT SUM(opening_balance) FROM bank_accounts WHERE account_type = 'cash'), 0)
@@ -1728,11 +1758,13 @@ export async function getFinanceDashboard(run: Run, opts: { from?: string; to?: 
        ORDER BY ba.account_type ASC, ba.name ASC`,
     );
 
-    return {
+   return {
       totalIncome,
       totalExpenses,
       pendingPayments: n(r.pending_ar),
       pendingVendorBills: n(r.pending_ap),
+      overdueInvoices: { count: r.overdue_invoice_count as number, amount: n(r.overdue_invoice_amount) },
+      overdueBills: { count: r.overdue_bill_count as number, amount: n(r.overdue_bill_amount) },
       profitLoss: totalIncome - totalExpenses,
       cashInHand: n(r.cash_in_hand),
       bankBalance: n(r.bank_balance),

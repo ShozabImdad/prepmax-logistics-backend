@@ -254,11 +254,21 @@ export async function createDeManifest(
 
     let sourceManifestId: string | null = null;
     if (input.sourceManifestPublicId) {
-      const { rows } = await sql.query<{ id: string; vendor_id: string | null }>(
-        "SELECT id, vendor_id FROM manifests WHERE public_id = $1",
+      const { rows } = await sql.query<{ id: string; vendor_id: string | null; status: string }>(
+        "SELECT id, vendor_id, status FROM manifests WHERE public_id = $1",
         [input.sourceManifestPublicId],
       );
       if (!rows[0]) throw new DeManifestError(404, "Source manifest not found");
+      // Once a de-manifest seeds its expected list from a source manifest,
+      // there's no mechanism to re-sync that list if the source manifest is
+      // edited afterward. Only allow linking once the source is locked
+      // (closed/dispatched) so its shipment list can no longer change.
+      if (rows[0]!.status === "open") {
+        throw new DeManifestError(
+          400,
+          "Source manifest must be closed or dispatched before it can be linked to a de-manifest",
+        );
+      }
       sourceManifestId = rows[0]!.id;
       // Default the de-manifest's vendor to whatever the linked outbound
       // manifest was booked with — usually the same courier is handing the

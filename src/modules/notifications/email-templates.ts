@@ -9,7 +9,8 @@ export type CustomerEmailTemplate =
   | "booking_received"
   | "order_confirmed"
   | "delivered"
-  | "exception";
+  | "exception"
+  | "cancelled";
 
 interface TemplateVars {
   customerName: string;
@@ -100,7 +101,17 @@ export function renderCustomerEmail(
           "There's an update on your shipment",
           `<p>Hi ${name},</p>
            <p>There's been an update on your shipment <strong>${esc(code)}</strong>${vars.statusText ? `: <em>${esc(vars.statusText)}</em>` : "."}</p>
-           <p>Please check the latest tracking for details. If you need help, contact your Prep Max branch.</p>`,
+         <p>Please check the latest tracking for details. If you need help, contact your Prep Max branch.</p>`,
+          code,
+        ),
+      };
+    case "cancelled":
+      return {
+        subject: `Your shipment was cancelled (${code})`,
+        html: shell(
+          "Your shipment has been cancelled",
+          `<p>Hi ${name},</p>
+           <p>Your shipment <strong>${esc(code)}</strong> has been cancelled by our team. If this is unexpected or you have questions, please contact your Prep Max branch.</p>`,
           code,
         ),
       };

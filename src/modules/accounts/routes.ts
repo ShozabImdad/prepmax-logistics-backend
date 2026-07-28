@@ -5,7 +5,7 @@
 // Branch isolation is enforced by RLS via req.db (the manager's context can
 // only INSERT rows for their own branch — the WITH CHECK policy blocks others,
 // proven in the isolation tests). Permission checks gate who can call these.
-
+import { recomputeTotals } from "../manifest/queries.js"
 import { Router } from "express";
 import { z } from "zod";
 import { asyncHandler } from "../../lib/http.js";
@@ -173,10 +173,33 @@ accountsRouter.delete(
       const b = await sql.query<{ id: string }>("SELECT id FROM branches WHERE public_id = $1", [pid]);
       if (!b.rows[0]) return null;
       const bid = b.rows[0].id;
+
+      // manifest_shipments/de_manifest_shipments cascade automatically once
+      // their parent manifests/de_manifests rows are deleted — delete those
+      // parents first, before touching orders (which manifest_shipments.order_id
+      // restricts against).
+      await sql.query("DELETE FROM manifests WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM de_manifests WHERE branch_id = $1", [bid]);
+
+      // vendor_bill_items/invoice_items cascade from their parents.
+      await sql.query("DELETE FROM payments WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM vendor_bills WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM invoices WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM expenses WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM vendors WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM bank_accounts WHERE branch_id = $1", [bid]);
+
+   await sql.query("DELETE FROM saved_contacts WHERE branch_id = $1", [bid]);
+      // quote_messages/complaint_messages CASCADE from quotes/complaints —
+      // deleting those two tables below cleans the messages up automatically,
+      // no separate DELETE needed (there is no single "conversations" table).
+      await sql.query("DELETE FROM complaints WHERE branch_id = $1", [bid]);
+      await sql.query("DELETE FROM quotes WHERE branch_id = $1", [bid]);
+
       const o = await sql.query("DELETE FROM orders WHERE branch_id = $1", [bid]);
       const c = await sql.query("DELETE FROM customers WHERE branch_id = $1", [bid]);
       const u = await sql.query("DELETE FROM users WHERE branch_id = $1", [bid]);
-      await sql.query("DELETE FROM branches WHERE id = $1", [bid]); // branch-scoped roles cascade
+      await sql.query("DELETE FROM branches WHERE id = $1", [bid]);
       return { orders: o.rowCount ?? 0, customers: c.rowCount ?? 0, staff: u.rowCount ?? 0 };
     });
     if (!result) return res.status(404).json({ error: "Branch not found" });
@@ -184,12 +207,15 @@ accountsRouter.delete(
   }),
 );
 
-// ── Create a branch-manager account (super-admin only) ──────────────────────
+// ── Create a branch-manager-type account, with any custom role (super-admin only) ──
 const managerInput = z.object({
   email: z.string().email(),
   password: z.string().min(8),
   fullName: z.string().min(1),
   branchPublicId: z.string().min(1),
+  // roles.id (raw uuid) — same id the permissions page already uses.
+  // Optional: omitted falls back to the global "Branch Manager" role.
+  roleId: z.string().uuid().optional(),
 });
 accountsRouter.post(
   "/managers",
@@ -207,6 +233,23 @@ accountsRouter.post(
           [parsed.data.branchPublicId],
         );
         if (!b.rows[0]) throw new HttpError(404, "Branch not found");
+
+        let roleId: string;
+        if (parsed.data.roleId) {
+          const r = await sql.query<{ id: string }>(
+            `SELECT id FROM roles WHERE id = $1 AND (branch_id IS NULL OR branch_id = $2)`,
+            [parsed.data.roleId, b.rows[0].id],
+          );
+          if (!r.rows[0]) throw new HttpError(404, "Role not found");
+          roleId = r.rows[0].id;
+        } else {
+          const r = await sql.query<{ id: string }>(
+            `SELECT id FROM roles WHERE branch_id IS NULL AND name = 'Branch Manager'`,
+          );
+          if (!r.rows[0]) throw new HttpError(500, "Default Branch Manager role missing");
+          roleId = r.rows[0].id;
+        }
+
         const { rows } = await sql.query<{ id: string; public_id: string; email: string; full_name: string; branch_id: string }>(
           `INSERT INTO users (public_id, branch_id, role, email, password_hash, full_name)
            VALUES ($1,$2,'branch_manager',$3,$4,$5)
@@ -214,14 +257,9 @@ accountsRouter.post(
           [publicId(), b.rows[0].id, parsed.data.email, hash, parsed.data.fullName],
         );
         const newUser = rows[0]!;
-        // Assign the default global "Branch Manager" role so the new manager
-        // has working permissions immediately. Their permissions can then be
-        // tuned via the permissions toggle page.
         await sql.query(
-          `INSERT INTO user_roles (user_id, role_id)
-             SELECT $1, id FROM roles WHERE branch_id IS NULL AND name = 'Branch Manager'
-           ON CONFLICT DO NOTHING`,
-          [newUser.id],
+          `INSERT INTO user_roles (user_id, role_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+          [newUser.id, roleId],
         );
         return { publicId: newUser.public_id, email: newUser.email, fullName: newUser.full_name };
       });
@@ -450,17 +488,50 @@ accountsRouter.delete(
   requirePermission("customers.delete"),
   asyncHandler(async (req, res) => {
     const pid = String(req.params.publicId ?? "");
-    const result = await req.db!(async (sql) => {
-      const c = await sql.query<{ id: string }>("SELECT id FROM customers WHERE public_id = $1", [pid]);
-      if (!c.rows[0]) return { found: false, orders: 0 };
-      const custId = c.rows[0].id;
-      // Cascade: delete the customer's orders (boxes/items/legs/events cascade via FK).
-      const del = await sql.query("DELETE FROM orders WHERE customer_id = $1", [custId]);
-      await sql.query("DELETE FROM customers WHERE id = $1", [custId]);
-      return { found: true, orders: del.rowCount ?? 0 };
-    });
-    if (!result.found) return res.status(404).json({ error: "Customer not found" });
-    return res.json({ ok: true, deletedOrders: result.orders });
+    try {
+      const result = await req.db!(async (sql) => {
+        const c = await sql.query<{ id: string }>("SELECT id FROM customers WHERE public_id = $1", [pid]);
+        if (!c.rows[0]) return { found: false, orders: 0 };
+        const custId = c.rows[0].id;
+
+        const { rows: invCheck } = await sql.query<{ count: string }>(
+          "SELECT COUNT(*)::text AS count FROM invoices WHERE customer_id = $1",
+          [custId],
+        );
+        if (Number(invCheck[0]!.count) > 0) {
+          throw new HttpError(409, "This customer has invoices on file and cannot be permanently deleted.");
+        }
+
+        // Unlink any of this customer's orders from manifests before deleting
+        // them, same as the standalone order delete path.
+        const { rows: onManifests } = await sql.query<{ manifest_id: string; order_id: string }>(
+          `SELECT ms.manifest_id, ms.order_id FROM manifest_shipments ms
+             JOIN orders o ON o.id = ms.order_id
+            WHERE o.customer_id = $1`,
+          [custId],
+        );
+        if (onManifests.length > 0) {
+          await sql.query(
+            `DELETE FROM manifest_shipments WHERE order_id IN (
+               SELECT id FROM orders WHERE customer_id = $1
+             )`,
+            [custId],
+          );
+          const uniqueManifests = [...new Set(onManifests.map((r) => r.manifest_id))];
+          for (const manifestId of uniqueManifests) {
+            await recomputeTotals(sql, manifestId);
+          }
+        }
+
+        const del = await sql.query("DELETE FROM orders WHERE customer_id = $1", [custId]);
+        await sql.query("DELETE FROM customers WHERE id = $1", [custId]);
+        return { found: true, orders: del.rowCount ?? 0 };
+      });
+      if (!result.found) return res.status(404).json({ error: "Customer not found" });
+      return res.json({ ok: true, deletedOrders: result.orders });
+    } catch (err) {
+      return handleError(err, res, "A customer with that email already exists in this branch");
+    }
   }),
 );
 
