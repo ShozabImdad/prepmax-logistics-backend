@@ -187,7 +187,10 @@ function mapVendor(r: Record<string, unknown>): VendorRow {
     updatedAt: r.updated_at as string,
   };
 }
-export async function listVendors(run: Run, opts: { activeOnly?: boolean; q?: string; branchPublicId?: string } = {}): Promise<VendorRow[]> {
+export async function listVendors(
+  run: Run,
+  opts: { activeOnly?: boolean; q?: string; branchPublicId?: string; limit?: number; offset?: number } = {},
+): Promise<{ rows: VendorRow[]; total: number }> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
@@ -204,11 +207,20 @@ export async function listVendors(run: Run, opts: { activeOnly?: boolean; q?: st
       conds.push(`v.branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    const limit = Math.min(opts.limit ?? 300, 1000);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const params2 = [...params, limit, offset];
+    const limitIdx = params2.length - 1;
+    const offsetIdx = params2.length;
     const { rows } = await sql.query(
-      `SELECT ${VENDOR_FIELDS} FROM vendors v ${where} ORDER BY v.name ASC LIMIT 300`,
+      `SELECT ${VENDOR_FIELDS} FROM vendors v ${where} ORDER BY v.name ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params2,
+    );
+    const { rows: countRows } = await sql.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM vendors v ${where}`,
       params,
     );
-    return rows.map(mapVendor);
+    return { rows: rows.map(mapVendor), total: Number(countRows[0]?.count ?? 0) };
   });
 }
 
@@ -406,7 +418,10 @@ function mapInvoice(r: Record<string, unknown>): InvoiceRow {
   };
 }
 
-export async function listInvoices(run: Run, opts: { status?: string; q?: string; branchPublicId?: string; customerPublicId?: string } = {}): Promise<InvoiceRow[]> {
+export async function listInvoices(
+  run: Run,
+  opts: { status?: string; q?: string; branchPublicId?: string; customerPublicId?: string; limit?: number; offset?: number } = {},
+): Promise<{ rows: InvoiceRow[]; total: number }> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
@@ -427,6 +442,11 @@ export async function listInvoices(run: Run, opts: { status?: string; q?: string
       conds.push(`cu.public_id = $${params.length}`);
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    const limit = Math.min(opts.limit ?? 300, 1000);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const params2 = [...params, limit, offset];
+    const limitIdx = params2.length - 1;
+    const offsetIdx = params2.length;
     const { rows } = await sql.query(
       `SELECT ${INVOICE_FIELDS} FROM invoices i
          JOIN customers cu ON cu.id = i.customer_id
@@ -435,10 +455,16 @@ export async function listInvoices(run: Run, opts: { status?: string; q?: string
          LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
          ${where}
         ORDER BY i.issue_date DESC, i.created_at DESC
-        LIMIT 300`,
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params2,
+    );
+    const { rows: countRows } = await sql.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM invoices i
+         JOIN customers cu ON cu.id = i.customer_id
+         ${where}`,
       params,
     );
-    return rows.map(mapInvoice);
+    return { rows: rows.map(mapInvoice), total: Number(countRows[0]?.count ?? 0) };
   });
 }
 
@@ -843,7 +869,10 @@ function mapBill(r: Record<string, unknown>): VendorBillRow {
   };
 }
 
-export async function listVendorBills(run: Run, opts: { status?: string; q?: string; branchPublicId?: string } = {}): Promise<VendorBillRow[]> {
+export async function listVendorBills(
+  run: Run,
+  opts: { status?: string; q?: string; branchPublicId?: string; limit?: number; offset?: number } = {},
+): Promise<{ rows: VendorBillRow[]; total: number }> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
@@ -857,16 +886,27 @@ export async function listVendorBills(run: Run, opts: { status?: string; q?: str
       conds.push(`vb.branch_id = (SELECT id FROM branches WHERE public_id = $${params.length})`);
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    const limit = Math.min(opts.limit ?? 300, 1000);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const params2 = [...params, limit, offset];
+    const limitIdx = params2.length - 1;
+    const offsetIdx = params2.length;
     const { rows } = await sql.query(
       `SELECT ${BILL_FIELDS} FROM vendor_bills vb
          JOIN vendors v ON v.id = vb.vendor_id
          JOIN branches b ON b.id = vb.branch_id
          ${where}
         ORDER BY vb.bill_date DESC, vb.created_at DESC
-        LIMIT 300`,
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params2,
+    );
+    const { rows: countRows } = await sql.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM vendor_bills vb
+         JOIN vendors v ON v.id = vb.vendor_id
+         ${where}`,
       params,
     );
-    return rows.map(mapBill);
+    return { rows: rows.map(mapBill), total: Number(countRows[0]?.count ?? 0) };
   });
 }
 
@@ -1118,8 +1158,8 @@ function mapPayment(r: Record<string, unknown>): PaymentRow {
 
 export async function listPayments(
   run: Run,
-  opts: { direction?: string; from?: string; to?: string; customerPublicId?: string } = {},
-): Promise<PaymentRow[]> {
+  opts: { direction?: string; from?: string; to?: string; customerPublicId?: string; limit?: number; offset?: number } = {},
+): Promise<{ rows: PaymentRow[]; total: number }> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
@@ -1128,6 +1168,11 @@ export async function listPayments(
     if (opts.to) { params.push(opts.to); conds.push(`p.paid_on <= $${params.length}`); }
     if (opts.customerPublicId) { params.push(opts.customerPublicId); conds.push(`cu.public_id = $${params.length}`); }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    const limit = Math.min(opts.limit ?? 500, 1000);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const params2 = [...params, limit, offset];
+    const limitIdx = params2.length - 1;
+    const offsetIdx = params2.length;
     const { rows } = await sql.query(
       `SELECT ${PAYMENT_FIELDS} FROM payments p
          LEFT JOIN customers cu ON cu.id = p.customer_id
@@ -1137,10 +1182,16 @@ export async function listPayments(
          LEFT JOIN bank_accounts ba ON ba.id = p.bank_account_id
          ${where}
         ORDER BY p.paid_on DESC, p.created_at DESC
-        LIMIT 500`,
+        LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params2,
+    );
+    const { rows: countRows } = await sql.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM payments p
+         LEFT JOIN customers cu ON cu.id = p.customer_id
+         ${where}`,
       params,
     );
-    return rows.map(mapPayment);
+    return { rows: rows.map(mapPayment), total: Number(countRows[0]?.count ?? 0) };
   });
 }
 
@@ -1358,8 +1409,8 @@ function mapExpense(r: Record<string, unknown>): ExpenseRow {
 
 export async function listExpenses(
   run: Run,
-  opts: { category?: string; from?: string; to?: string } = {},
-): Promise<ExpenseRow[]> {
+  opts: { category?: string; from?: string; to?: string; limit?: number; offset?: number } = {},
+): Promise<{ rows: ExpenseRow[]; total: number }> {
   return run(async (sql) => {
     const conds: string[] = [];
     const params: unknown[] = [];
@@ -1367,13 +1418,22 @@ export async function listExpenses(
     if (opts.from) { params.push(opts.from); conds.push(`e.spent_on >= $${params.length}`); }
     if (opts.to) { params.push(opts.to); conds.push(`e.spent_on <= $${params.length}`); }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+    const limit = Math.min(opts.limit ?? 500, 1000);
+    const offset = Math.max(opts.offset ?? 0, 0);
+    const params2 = [...params, limit, offset];
+    const limitIdx = params2.length - 1;
+    const offsetIdx = params2.length;
     const { rows } = await sql.query(
       `SELECT ${EXPENSE_FIELDS} FROM expenses e
          LEFT JOIN bank_accounts ba ON ba.id = e.bank_account_id
-         ${where} ORDER BY e.spent_on DESC, e.created_at DESC LIMIT 500`,
+         ${where} ORDER BY e.spent_on DESC, e.created_at DESC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params2,
+    );
+    const { rows: countRows } = await sql.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM expenses e ${where}`,
       params,
     );
-    return rows.map(mapExpense);
+    return { rows: rows.map(mapExpense), total: Number(countRows[0]?.count ?? 0) };
   });
 }
 

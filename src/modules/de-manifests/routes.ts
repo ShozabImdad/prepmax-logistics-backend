@@ -24,6 +24,7 @@ import {
   listDeManifests, getDeManifest, createDeManifest, updateDeManifest, deleteDeManifest,
   scanShipment, updateShipment, removeShipment, completeDeManifest,
 } from "./queries.js";
+import { deManifestPdf, deManifestShipmentsCsv, deManifestShipmentsExcel } from "./print.js";
 
 export const deManifestRouter: Router = Router(); // staff: /api/de-manifests
 
@@ -88,6 +89,7 @@ deManifestRouter.post(
 );
 
 // ── get one (header + shipments) ────────────────────────────────────────────
+// ── get one (header + shipments) ────────────────────────────────────────────
 deManifestRouter.get(
   "/:publicId",
   requireStaff, requirePermission("demanifest.manage"),
@@ -95,6 +97,59 @@ deManifestRouter.get(
     try {
       const deManifest = await getDeManifest(req.db!, param(req.params.publicId));
       return res.json({ deManifest });
+    } catch (err) {
+      return handleDeManifestError(err, res);
+    }
+  }),
+);
+
+
+
+// ── PDF (receiving / reconciliation report) ─────────────────────────────────
+deManifestRouter.get(
+  "/:publicId/de-manifest.pdf",
+  requireStaff, requirePermission("demanifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const deManifest = await getDeManifest(req.db!, param(req.params.publicId));
+      const pdf = await deManifestPdf(deManifest);
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-disposition", `inline; filename="DeManifest-${deManifest.deManifestNo}.pdf"`);
+      return res.end(pdf);
+    } catch (err) {
+      return handleDeManifestError(err, res);
+    }
+  }),
+);
+
+// ── CSV export ───────────────────────────────────────────────────────────
+deManifestRouter.get(
+  "/:publicId/shipments.csv",
+  requireStaff, requirePermission("demanifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const deManifest = await getDeManifest(req.db!, param(req.params.publicId));
+      const csv = deManifestShipmentsCsv(deManifest);
+      res.setHeader("content-type", "text/csv; charset=utf-8");
+      res.setHeader("content-disposition", `attachment; filename="DeManifest-${deManifest.deManifestNo}.csv"`);
+      return res.end(csv);
+    } catch (err) {
+      return handleDeManifestError(err, res);
+    }
+  }),
+);
+
+// ── Excel export ─────────────────────────────────────────────────────────
+deManifestRouter.get(
+  "/:publicId/shipments.xlsx",
+  requireStaff, requirePermission("demanifest.manage"),
+  asyncHandler(async (req, res) => {
+    try {
+      const deManifest = await getDeManifest(req.db!, param(req.params.publicId));
+      const xlsx = deManifestShipmentsExcel(deManifest);
+      res.setHeader("content-type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("content-disposition", `attachment; filename="DeManifest-${deManifest.deManifestNo}.xlsx"`);
+      return res.end(xlsx);
     } catch (err) {
       return handleDeManifestError(err, res);
     }

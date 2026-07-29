@@ -32,11 +32,14 @@ portalFinanceRouter.get(
     const cust = req.auth!;
     if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
     try {
-      const [ledger, invoices] = await Promise.all([
+      const [ledger, invoiceResult] = await Promise.all([
         getCustomerLedger(req.db!, cust.publicId),
-        listInvoices(req.db!, { customerPublicId: cust.publicId }),
+        // A customer's own invoice count is small (never the branch-wide
+        // cap), so a large limit here safely covers "all of them" for the
+        // summary totals below.
+        listInvoices(req.db!, { customerPublicId: cust.publicId, limit: 1000 }),
       ]);
-      const nonVoid = invoices.filter((i) => i.status !== "void");
+      const nonVoid = invoiceResult.rows.filter((i) => i.status !== "void");
       const totalInvoiced = nonVoid.reduce((s, i) => s + i.total, 0);
       const totalPaid = nonVoid.reduce((s, i) => s + i.amountPaid, 0);
     const totalPending = nonVoid.reduce((s, i) => s + Math.max(0, i.total - i.amountPaid - i.creditedAmount), 0);
@@ -63,8 +66,12 @@ portalFinanceRouter.get(
     const cust = req.auth!;
     if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
-    const invoices = await listInvoices(req.db!, { customerPublicId: cust.publicId, status });
-    return res.json({ invoices });
+    const rawLimit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+    const rawOffset = typeof req.query.offset === "string" ? Number.parseInt(req.query.offset, 10) : NaN;
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 300;
+    const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+    const { rows: invoices, total } = await listInvoices(req.db!, { customerPublicId: cust.publicId, status, limit, offset });
+    return res.json({ invoices, total, limit, offset });
   }),
 );
 
@@ -95,7 +102,11 @@ portalFinanceRouter.get(
   asyncHandler(async (req, res) => {
     const cust = req.auth!;
     if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
-    const payments = await listPayments(req.db!, { customerPublicId: cust.publicId, direction: "in" });
-    return res.json({ payments });
+    const rawLimit = typeof req.query.limit === "string" ? Number.parseInt(req.query.limit, 10) : NaN;
+    const rawOffset = typeof req.query.offset === "string" ? Number.parseInt(req.query.offset, 10) : NaN;
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 500;
+    const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? rawOffset : 0;
+    const { rows: payments, total } = await listPayments(req.db!, { customerPublicId: cust.publicId, direction: "in", limit, offset });
+    return res.json({ payments, total, limit, offset });
   }),
 );

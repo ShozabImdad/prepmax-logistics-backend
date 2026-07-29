@@ -83,6 +83,20 @@ function str(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+// Shared paging parser for finance list endpoints. `limit`/`offset` are
+// optional query params; defaultLimit preserves each endpoint's previous
+// hardcoded LIMIT as the default page size so existing callers are
+// unaffected, but callers can now page past it via ?offset=.
+function paging(req: Request, defaultLimit: number): { limit: number; offset: number } {
+  const rawLimit = str(req.query.limit);
+  const rawOffset = str(req.query.offset);
+  const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : NaN;
+  const parsedOffset = rawOffset ? Number.parseInt(rawOffset, 10) : NaN;
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 1000) : defaultLimit;
+  const offset = Number.isFinite(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0;
+  return { limit, offset };
+}
+
 // Resolve branch ID for the current request.
 // - branch_manager: use their assigned branch (staff.branchId is always set).
 // - super_admin:    must supply branchPublicId in the body; look up the real UUID.
@@ -191,8 +205,9 @@ financeRouter.get(
     const activeOnly = req.query.activeOnly === "true";
     const q = str(req.query.q);
     const branchPublicId = str(req.query.branchPublicId);
-    const vendors = await listVendors(req.db!, { activeOnly, q, branchPublicId });
-    return res.json({ vendors });
+    const { limit, offset } = paging(req, 300);
+    const { rows: vendors, total } = await listVendors(req.db!, { activeOnly, q, branchPublicId, limit, offset });
+    return res.json({ vendors, total, limit, offset });
   }),
 );
 
@@ -297,8 +312,9 @@ financeRouter.get(
     const status = str(req.query.status);
     const q = str(req.query.q);
     const branchPublicId = str(req.query.branchPublicId);
-    const invoices = await listInvoices(req.db!, { status, q, branchPublicId });
-    return res.json({ invoices });
+    const { limit, offset } = paging(req, 300);
+    const { rows: invoices, total } = await listInvoices(req.db!, { status, q, branchPublicId, limit, offset });
+    return res.json({ invoices, total, limit, offset });
   }),
 );
 
@@ -436,8 +452,9 @@ financeRouter.get(
     const status = str(req.query.status);
     const q = str(req.query.q);
     const branchPublicId = str(req.query.branchPublicId);
-    const bills = await listVendorBills(req.db!, { status, q, branchPublicId });
-    return res.json({ bills });
+    const { limit, offset } = paging(req, 300);
+    const { rows: bills, total } = await listVendorBills(req.db!, { status, q, branchPublicId, limit, offset });
+    return res.json({ bills, total, limit, offset });
   }),
 );
 
@@ -528,8 +545,9 @@ financeRouter.get(
     const direction = str(req.query.direction);
     const from = str(req.query.from);
     const to = str(req.query.to);
-    const payments = await listPayments(req.db!, { direction, from, to });
-    return res.json({ payments });
+    const { limit, offset } = paging(req, 500);
+    const { rows: payments, total } = await listPayments(req.db!, { direction, from, to, limit, offset });
+    return res.json({ payments, total, limit, offset });
   }),
 );
 
@@ -574,8 +592,9 @@ financeRouter.get(
     const category = str(req.query.category);
     const from = str(req.query.from);
     const to = str(req.query.to);
-    const expenses = await listExpenses(req.db!, { category, from, to });
-    return res.json({ expenses });
+    const { limit, offset } = paging(req, 500);
+    const { rows: expenses, total } = await listExpenses(req.db!, { category, from, to, limit, offset });
+    return res.json({ expenses, total, limit, offset });
   }),
 );
 
