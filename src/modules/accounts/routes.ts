@@ -13,8 +13,8 @@ import { hashPassword } from "../../lib/password.js";
 import { publicId } from "../../lib/ids.js";
 import {
   requireStaff,
-  requireSuperAdmin,
   requirePermission,
+  requireSuperAdmin,
 } from "../../middleware/auth.js";
 import { isStaff } from "../auth/types.js";
 import { withoutContext, withSuperAdminAllBranches } from "../../db/pool.js";
@@ -28,6 +28,7 @@ const branchInput = z.object({
 });
 accountsRouter.post(
   "/branches",
+  requireStaff,
   requireSuperAdmin,
   asyncHandler(async (req, res) => {
     const parsed = branchInput.safeParse(req.body);
@@ -58,11 +59,18 @@ accountsRouter.post(
   }),
 );
 
-// ── Branch detail (super-admin: stats + recent orders + staff + customers) ──
+// ── Branch detail (stats + recent orders + staff + customers) ───────────────
+// Gated by branches.view. A branch_manager holding that permission can only
+// see their OWN branch's detail — the permission grants "can view branches",
+// not "can view every branch"; withSuperAdminAllBranches is only used here to
+// run the aggregate query, the branch-id check below is what enforces scope.
 accountsRouter.get(
   "/branches/:publicId",
-  requireSuperAdmin,
+  requireStaff,
+  requirePermission("branches.view"),
   asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
     const pid = String(req.params.publicId ?? "");
     const data = await withSuperAdminAllBranches(async (sql) => {
       const b = await sql.query(
@@ -72,6 +80,7 @@ accountsRouter.get(
       );
       if (!b.rows[0]) return null;
       const branch = b.rows[0];
+      if (staff.role !== "super_admin" && branch.id !== staff.branchId) return null;
       const bid = branch.id;
 
       const stats = await sql.query(
@@ -91,7 +100,7 @@ accountsRouter.get(
            FROM orders WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 10`,
         [bid],
       );
-      const staff = await sql.query(
+      const branchStaff = await sql.query(
         `SELECT public_id, full_name, email, role, is_active
            FROM users WHERE branch_id = $1 ORDER BY full_name`,
         [bid],
@@ -101,7 +110,7 @@ accountsRouter.get(
            FROM customers WHERE branch_id = $1 ORDER BY created_at DESC LIMIT 25`,
         [bid],
       );
-      return { branch, stats: stats.rows[0], recentOrders: recentOrders.rows, staff: staff.rows, customers: customers.rows };
+      return { branch, stats: stats.rows[0], recentOrders: recentOrders.rows, staff: branchStaff.rows, customers: customers.rows };
     });
     if (!data) return res.status(404).json({ error: "Branch not found" });
     const s = data.stats;
@@ -130,7 +139,7 @@ accountsRouter.get(
   }),
 );
 
-// ── Edit branch settings (super-admin only) ─────────────────────────────────
+// ── Edit branch settings ─────────────────────────────────────────────────────
 const branchEdit = z.object({
   name: z.string().min(1).optional(),
   city: z.string().min(1).optional(),
@@ -139,12 +148,20 @@ const branchEdit = z.object({
 });
 accountsRouter.patch(
   "/branches/:publicId",
-  requireSuperAdmin,
+  requireStaff,
+  requirePermission("branches.edit"),
   asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
     const parsed = branchEdit.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "Invalid branch edit" });
     const pid = String(req.params.publicId ?? "");
     const updated = await withSuperAdminAllBranches(async (sql) => {
+      // Same scoping as the detail route: a manager can only edit their own branch.
+      if (staff.role !== "super_admin") {
+        const b = await sql.query<{ id: string }>("SELECT id FROM branches WHERE public_id = $1", [pid]);
+        if (!b.rows[0] || b.rows[0].id !== staff.branchId) return 0;
+      }
       const set: string[] = []; const vals: unknown[] = [];
       const push = (col: string, v: unknown) => { vals.push(v); set.push(`${col} = $${vals.length}`); };
       if (parsed.data.name !== undefined) push("name", parsed.data.name);
@@ -161,19 +178,24 @@ accountsRouter.patch(
   }),
 );
 
-// ── Delete a branch (super-admin, full cascade) ─────────────────────────────
+// ── Delete a branch (full cascade) ──────────────────────────────────────────
 // branches are ON DELETE RESTRICT from orders/customers/users, so we tear
 // those down in FK order first. Orders cascade to boxes/items/legs/tracking.
 accountsRouter.delete(
   "/branches/:publicId",
+  requireStaff,
   requireSuperAdmin,
   asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
     const pid = String(req.params.publicId ?? "");
     const result = await withSuperAdminAllBranches(async (sql) => {
       const b = await sql.query<{ id: string }>("SELECT id FROM branches WHERE public_id = $1", [pid]);
       if (!b.rows[0]) return null;
+      // Route is super-admin-only (see requireSuperAdmin above), so the
+      // old own-branch scoping check is no longer reachable — a super
+      // admin can delete any branch, which is the point of this route.
       const bid = b.rows[0].id;
-
       // manifest_shipments/de_manifest_shipments cascade automatically once
       // their parent manifests/de_manifests rows are deleted — delete those
       // parents first, before touching orders (which manifest_shipments.order_id
@@ -207,7 +229,26 @@ accountsRouter.delete(
   }),
 );
 
-// ── Create a branch-manager-type account, with any custom role (super-admin only) ──
+// ── Create a staff account (accounts.add) ───────────────────────────────────
+// Historically this route only ever created branch_manager-type accounts and
+// was locked to requireSuperAdmin. It's now the general "create staff"
+// endpoint — gated by the accounts.add permission like every other staff
+// mutation, matching accounts.edit on PATCH /staff/:publicId in
+// staff/routes.ts. A few things that change with that:
+//
+// - Branch scoping: a non-super-admin is forced into their OWN branch
+//   (branchPublicId, if sent, must match) — same posture as POST /customers.
+//   Only a super-admin may target an arbitrary branch.
+// - Granting the RBAC "Branch Manager" role specifically stays
+//   super-admin-only, even for someone holding accounts.add — same rule as
+//   staff/routes.ts POST /:publicId/roles, checked via actor.roleNames so
+//   it isn't fooled by users.role.
+// - The 1:1-per-branch check below is scoped to that SAME condition — only
+//   when the role actually being granted is the global "Branch Manager"
+//   role. It must NOT key off users.role='branch_manager', because every
+//   non-super-admin staff account has that value regardless of which RBAC
+//   role they hold; checking it unconditionally would block creating a
+//   second staff member of any kind once a branch has its first one.
 const managerInput = z.object({
   email: z.string().email(),
   password: z.string().min(8),
@@ -219,8 +260,11 @@ const managerInput = z.object({
 });
 accountsRouter.post(
   "/managers",
-  requireSuperAdmin,
+  requireStaff,
+  requirePermission("accounts.add"),
   asyncHandler(async (req, res) => {
+    const actor = req.auth!;
+    if (!isStaff(actor)) return res.status(403).json({ error: "Staff only" });
     const parsed = managerInput.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json({ error: "email, password (min 8), fullName, branchPublicId required" });
@@ -234,20 +278,55 @@ accountsRouter.post(
         );
         if (!b.rows[0]) throw new HttpError(404, "Branch not found");
 
+        // Branch scoping: non-super-admins are forced to their own branch.
+        if (actor.role !== "super_admin" && b.rows[0].id !== actor.branchId) {
+          throw new HttpError(403, "You can only create staff in your own branch");
+        }
+
         let roleId: string;
+        let roleName: string;
+        let roleIsGlobal: boolean;
         if (parsed.data.roleId) {
-          const r = await sql.query<{ id: string }>(
-            `SELECT id FROM roles WHERE id = $1 AND (branch_id IS NULL OR branch_id = $2)`,
+          const r = await sql.query<{ id: string; name: string; branch_id: string | null }>(
+            `SELECT id, name, branch_id FROM roles WHERE id = $1 AND (branch_id IS NULL OR branch_id = $2)`,
             [parsed.data.roleId, b.rows[0].id],
           );
           if (!r.rows[0]) throw new HttpError(404, "Role not found");
           roleId = r.rows[0].id;
+          roleName = r.rows[0].name;
+          roleIsGlobal = r.rows[0].branch_id === null;
         } else {
-          const r = await sql.query<{ id: string }>(
-            `SELECT id FROM roles WHERE branch_id IS NULL AND name = 'Branch Manager'`,
+          const r = await sql.query<{ id: string; name: string }>(
+            `SELECT id, name FROM roles WHERE branch_id IS NULL AND name = 'Branch Manager'`,
           );
           if (!r.rows[0]) throw new HttpError(500, "Default Branch Manager role missing");
           roleId = r.rows[0].id;
+          roleName = r.rows[0].name;
+          roleIsGlobal = true;
+        }
+     const grantingBranchManagerRole = roleIsGlobal && roleName === "Branch Manager";
+
+// Only a real DB-level super_admin can hand out the global Branch
+// Manager role — accounts.add alone isn't enough, same as
+// staff/routes.ts. Checked against actor.role (the immutable DB column),
+// not an RBAC role name, since anyone could create/hold a custom RBAC
+// role also named "Super Admin".
+if (grantingBranchManagerRole && actor.role !== "super_admin") {
+  throw new HttpError(403, "Only a super-admin can assign the Branch Manager role");
+}
+
+        // 1:1 enforcement, scoped to the Branch Manager role specifically —
+        // not to users.role, which every staff account shares.
+        if (grantingBranchManagerRole) {
+          const existing = await sql.query<{ id: string }>(
+            `SELECT ur.user_id AS id FROM user_roles ur
+               JOIN users tu ON tu.id = ur.user_id
+              WHERE ur.role_id = $1 AND tu.branch_id = $2`,
+            [roleId, b.rows[0].id],
+          );
+          if (existing.rows[0]) {
+            throw new HttpError(409, "This branch already has a Branch Manager assigned");
+          }
         }
 
         const { rows } = await sql.query<{ id: string; public_id: string; email: string; full_name: string; branch_id: string }>(
@@ -345,7 +424,7 @@ accountsRouter.get(
     const rows = await withSuperAdminAllBranches(async (sql) => {
       const conds: string[] = [];
       const params: unknown[] = [];
-      if (staff.role === "branch_manager") {
+      if (staff.role !== "super_admin") {
         params.push(staff.branchId);
         conds.push(`id = $${params.length}`);
       }

@@ -25,6 +25,11 @@ const MANAGER_PERMISSIONS = [
   "customers.view", "customers.create", "customers.edit", "customers.delete",
   "documents.print", "reports.view",
   "complaints.manage", "quotes.manage", "finance.manage", "manifest.manage", "demanifest.manage",
+  // roles.view/.manage: lets a branch manager see the role list and (un)assign
+  // roles to staff in their own branch. Safe to hand out by default — the
+  // subset check + the "Branch Manager" role carve-out in staff/routes.ts
+  // stop this from becoming an escalation path.
+  "roles.view", "roles.manage",
 ];
 
 async function run(): Promise<void> {

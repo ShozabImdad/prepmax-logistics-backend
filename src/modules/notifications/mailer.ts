@@ -18,11 +18,19 @@ export interface SendResult {
   error?: string;
 }
 
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  cid: string;
+  contentType?: string;
+}
+
 export interface EmailMessage {
   to: string;
   subject: string;
   html: string;
   text?: string;
+  attachments?: EmailAttachment[];
 }
 
 let transporter: Transporter | null = null;
@@ -75,6 +83,12 @@ export async function sendEmail(msg: EmailMessage): Promise<SendResult> {
       subject: msg.subject,
       html: msg.html,
       text: msg.text ?? htmlToText(msg.html),
+      attachments: msg.attachments?.map((a) => ({
+        filename: a.filename,
+        content: a.content,
+        cid: a.cid,
+        contentType: a.contentType,
+      })),
     });
     return { status: "sent", providerId: info.messageId };
   } catch (e) {

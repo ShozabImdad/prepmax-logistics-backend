@@ -122,12 +122,12 @@ async function emailCustomer(
   statusText?: string,
 ): Promise<void> {
   if (!info.customerEmail) return; // no customer / no address to email
-  const { subject, html } = renderCustomerEmail(template, {
+  const { subject, html, attachments } = renderCustomerEmail(template, {
     customerName: info.customerName ?? "Customer",
     trackingCode: info.trackingCode,
     statusText,
   });
-  const result = await sendEmail({ to: info.customerEmail, subject, html });
+  const result = await sendEmail({ to: info.customerEmail, subject, html, attachments });
   await withBranch(branchId, (sql) =>
     logEmail((fn) => fn(sql), {
       branchId, orderId, customerId: info.customerId, toEmail: info.customerEmail!,

@@ -5,19 +5,35 @@
 
 import { Router } from "express";
 import { asyncHandler } from "../../lib/http.js";
-import { requireStaff, requirePermission } from "../../middleware/auth.js";
+import { requireStaff } from "../../middleware/auth.js";
+import { isStaff } from "../auth/types.js";
 
 export const analyticsRouter: Router = Router();
 
 analyticsRouter.get(
   "/summary",
   requireStaff,
-  requirePermission("orders.view"),
   asyncHandler(async (req, res) => {
+    const actor = req.auth!;
+    if (!isStaff(actor)) return res.status(403).json({ error: "Staff only" });
+    // No single permission gates the whole dashboard anymore — each section
+    // is independently visible based on what the caller actually holds, so
+    // e.g. a data-entry staffer without orders.view just gets an empty
+    // response instead of a 403 that blanks out finance widgets they *do*
+    // have rights to (or vice versa).
+    const canSeeOrders = actor.permissions.has("orders.view");
+    const canSeeFinancials = actor.permissions.has("finance.manage");
+
     const days = Math.min(Math.max(Number(req.query.days ?? 30) || 30, 7), 365);
 
     const data = await req.db!(async (sql) => {
-      // KPI totals
+      if (!canSeeOrders && !canSeeFinancials) {
+        // Neither permission — don't touch the DB at all.
+        return { totals: null, perDay: [], statusBreakdown: [], topDestinations: [], carrierUsage: [] };
+      }
+
+      // KPI totals — always run if either flag is set (cheap single query),
+      // then the response mapping below picks which fields to actually send.
       const totals = await sql.query<{
         total: number; delivered: number; active: number; pending: number; exceptions: number;
         revenue: number; unpaid_amount: number;
@@ -33,35 +49,42 @@ analyticsRouter.get(
          FROM orders`,
       );
 
-      // orders + revenue per day (last N days)
-      const perDay = await sql.query<{ day: string; orders: number; revenue: number }>(
-        `SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day,
-                count(*)::int AS orders,
-                COALESCE(sum(price), 0) AS revenue
-           FROM orders
-          WHERE created_at >= now() - ($1 || ' days')::interval
-          GROUP BY created_at::date
-          ORDER BY created_at::date`,
-        [days],
-      );
+      // orders + revenue per day (last N days) — needed if either chart is visible.
+      const perDay = canSeeOrders || canSeeFinancials
+        ? await sql.query<{ day: string; orders: number; revenue: number }>(
+            `SELECT to_char(created_at::date, 'YYYY-MM-DD') AS day,
+                    count(*)::int AS orders,
+                    COALESCE(sum(price), 0) AS revenue
+               FROM orders
+              WHERE created_at >= now() - ($1 || ' days')::interval
+              GROUP BY created_at::date
+              ORDER BY created_at::date`,
+            [days],
+          )
+        : { rows: [] };
 
-      // status breakdown (order_status)
-      const statusBreakdown = await sql.query<{ status: string; count: number }>(
-        `SELECT order_status AS status, count(*)::int AS count FROM orders GROUP BY order_status`,
-      );
+      // The rest are pure order-shape data — only worth querying for
+      // canSeeOrders callers.
+      const statusBreakdown = canSeeOrders
+        ? await sql.query<{ status: string; count: number }>(
+            `SELECT order_status AS status, count(*)::int AS count FROM orders GROUP BY order_status`,
+          )
+        : { rows: [] };
 
-      // top destinations (receiver country)
-      const topDestinations = await sql.query<{ destination: string; count: number }>(
-        `SELECT COALESCE(NULLIF(receiver_country, ''), 'Unknown') AS destination, count(*)::int AS count
-           FROM orders GROUP BY receiver_country ORDER BY count DESC LIMIT 8`,
-      );
+      const topDestinations = canSeeOrders
+        ? await sql.query<{ destination: string; count: number }>(
+            `SELECT COALESCE(NULLIF(receiver_country, ''), 'Unknown') AS destination, count(*)::int AS count
+               FROM orders GROUP BY receiver_country ORDER BY count DESC LIMIT 8`,
+          )
+        : { rows: [] };
 
-      // carrier usage (from active/first shipment leg)
-      const carrierUsage = await sql.query<{ carrier: string; count: number }>(
-        `SELECT sl.carrier, count(DISTINCT sl.order_id)::int AS count
-           FROM shipment_legs sl
-          GROUP BY sl.carrier ORDER BY count DESC`,
-      );
+      const carrierUsage = canSeeOrders
+        ? await sql.query<{ carrier: string; count: number }>(
+            `SELECT sl.carrier, count(DISTINCT sl.order_id)::int AS count
+               FROM shipment_legs sl
+              GROUP BY sl.carrier ORDER BY count DESC`,
+          )
+        : { rows: [] };
 
       return {
         totals: totals.rows[0]!,
@@ -74,19 +97,27 @@ analyticsRouter.get(
 
     return res.json({
       days,
-      totals: {
-        total: data.totals.total,
-        delivered: data.totals.delivered,
-        active: data.totals.active,
-        pending: data.totals.pending,
-        exceptions: data.totals.exceptions,
-        revenue: Number(data.totals.revenue),
-        unpaidAmount: Number(data.totals.unpaid_amount),
-      },
-      ordersPerDay: data.perDay.map((r) => ({ day: r.day, orders: r.orders, revenue: Number(r.revenue) })),
-      statusBreakdown: data.statusBreakdown,
-      topDestinations: data.topDestinations,
-      carrierUsage: data.carrierUsage,
+      totals: data.totals ? {
+        // Order-shape counts, only for canSeeOrders.
+        total: canSeeOrders ? data.totals.total : undefined,
+        delivered: canSeeOrders ? data.totals.delivered : undefined,
+        active: canSeeOrders ? data.totals.active : undefined,
+        pending: canSeeOrders ? data.totals.pending : undefined,
+        exceptions: canSeeOrders ? data.totals.exceptions : undefined,
+        // Financial figures, only for canSeeFinancials.
+        revenue: canSeeFinancials ? Number(data.totals.revenue) : undefined,
+        unpaidAmount: canSeeFinancials ? Number(data.totals.unpaid_amount) : undefined,
+      } : undefined,
+      ordersPerDay: (canSeeOrders || canSeeFinancials)
+        ? data.perDay.map((r) => ({
+            day: r.day,
+            orders: canSeeOrders ? r.orders : undefined,
+            revenue: canSeeFinancials ? Number(r.revenue) : undefined,
+          }))
+        : undefined,
+      statusBreakdown: canSeeOrders ? data.statusBreakdown : undefined,
+      topDestinations: canSeeOrders ? data.topDestinations : undefined,
+      carrierUsage: canSeeOrders ? data.carrierUsage : undefined,
     });
   }),
 );

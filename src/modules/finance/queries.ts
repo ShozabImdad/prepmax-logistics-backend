@@ -1535,6 +1535,8 @@ export interface LedgerEntry {
   debit: number;
   credit: number;
   balance: number;
+  dueDate: string | null;
+  overdue: boolean;
 }
 
 export async function getCustomerLedger(run: Run, customerPublicId: string): Promise<{ entries: LedgerEntry[]; closingBalance: number }> {
@@ -1546,7 +1548,7 @@ export async function getCustomerLedger(run: Run, customerPublicId: string): Pro
     if (!custRows[0]) throw new FinanceError(404, "Customer not found");
 
     const { rows } = await sql.query(
-      `SELECT i.issue_date AS dt, i.invoice_no AS ref, 0 AS kind, i.created_at AS sort_ts,
+     `SELECT i.issue_date AS dt, i.invoice_no AS ref, 0 AS kind, i.created_at AS sort_ts,
               CASE
                 WHEN i.is_credit_note AND ri.invoice_no IS NOT NULL
                   THEN COALESCE(NULLIF(i.notes,''), 'Credit Note — credits ' || ri.invoice_no)
@@ -1555,18 +1557,24 @@ export async function getCustomerLedger(run: Run, customerPublicId: string): Pro
                 ELSE COALESCE(NULLIF(i.notes,''), 'Invoice ' || i.invoice_no)
               END AS descr,
              CASE WHEN i.is_credit_note THEN 0 ELSE i.total END AS debit,
-              CASE WHEN i.is_credit_note THEN -i.total ELSE 0 END AS credit
+              CASE WHEN i.is_credit_note THEN -i.total ELSE 0 END AS credit,
+              i.due_date AS due_date,
+              (NOT i.is_credit_note AND i.status IN ('unpaid','partial')
+                AND i.due_date IS NOT NULL AND i.due_date < CURRENT_DATE) AS overdue
          FROM invoices i
          LEFT JOIN invoices ri ON ri.id = i.referenced_invoice_id
         WHERE i.customer_id = $1 AND i.status <> 'void'
      UNION ALL
-       SELECT p.paid_on AS dt, COALESCE(i.invoice_no, '') AS ref, 1 AS kind, p.created_at AS sort_ts,
+       SELECT p.paid_on AS dt,
+              CASE WHEN i.invoice_no IS NOT NULL THEN 'Payment for -> ' || i.invoice_no ELSE '' END AS ref,
+              1 AS kind, p.created_at AS sort_ts,
               COALESCE(NULLIF(p.reference,''), NULLIF(p.notes,''), 'Payment received') AS descr,
-              0 AS debit, p.amount AS credit
+              0 AS debit, p.amount AS credit,
+              NULL::date AS due_date, false AS overdue
          FROM payments p
          LEFT JOIN invoices i ON i.id = p.invoice_id
         WHERE p.customer_id = $1 AND p.direction = 'in'
-        ORDER BY dt ASC, ref ASC, kind ASC, sort_ts ASC`,
+        ORDER BY dt ASC, sort_ts ASC, kind ASC, ref ASC`,
       [custRows[0].id],
     );
 
@@ -1581,6 +1589,8 @@ export async function getCustomerLedger(run: Run, customerPublicId: string): Pro
         debit: n(r.debit),
         credit: n(r.credit),
         balance,
+        dueDate: (r.due_date as string | null) ?? null,
+        overdue: r.overdue as boolean,
       });
     }
     return { entries, closingBalance: balance };
@@ -1596,24 +1606,29 @@ export async function getVendorLedger(run: Run, vendorPublicId: string): Promise
     if (!vRows[0]) throw new FinanceError(404, "Vendor not found");
     const opening = n(vRows[0].opening_balance);
 
-   const { rows } = await sql.query(
+  const { rows } = await sql.query(
       `SELECT vb.bill_date AS dt, COALESCE(vb.bill_no, vb.public_id) AS ref, 0 AS kind, vb.created_at AS sort_ts,
               COALESCE(NULLIF(vb.notes,''), 'Vendor bill') AS descr,
-              0 AS debit, vb.total AS credit
+              0 AS debit, vb.total AS credit,
+              vb.due_date AS due_date,
+              (vb.status IN ('unpaid','partial') AND vb.due_date IS NOT NULL AND vb.due_date < CURRENT_DATE) AS overdue
          FROM vendor_bills vb
         WHERE vb.vendor_id = $1 AND vb.status <> 'void'
-      UNION ALL
-       SELECT p.paid_on AS dt, COALESCE(vb.bill_no, '') AS ref, 1 AS kind, p.created_at AS sort_ts,
+     UNION ALL
+    SELECT p.paid_on AS dt,
+              CASE WHEN vb.bill_no IS NOT NULL THEN 'Payment for -> ' || vb.bill_no ELSE '' END AS ref,
+              1 AS kind, p.created_at AS sort_ts,
               COALESCE(NULLIF(p.reference,''), NULLIF(p.notes,''), 'Payment made') AS descr,
-              p.amount AS debit, 0 AS credit
+              p.amount AS debit, 0 AS credit,
+              NULL::date AS due_date, false AS overdue
          FROM payments p
          LEFT JOIN vendor_bills vb ON vb.id = p.vendor_bill_id
         WHERE p.vendor_id = $1 AND p.direction = 'out'
-        ORDER BY dt ASC, ref ASC, kind ASC, sort_ts ASC`,
+        ORDER BY dt ASC, sort_ts ASC, kind ASC, ref ASC`,
       [vRows[0].id],
     );
 
-    const entries: LedgerEntry[] = [];
+   const entries: LedgerEntry[] = [];
     let balance = opening; // positive = we owe them
     if (opening !== 0) {
       entries.push({
@@ -1623,6 +1638,8 @@ export async function getVendorLedger(run: Run, vendorPublicId: string): Promise
         debit: opening < 0 ? -opening : 0,
         credit: opening > 0 ? opening : 0,
         balance,
+        dueDate: null,
+        overdue: false,
       });
     }
     for (const r of rows) {
@@ -1635,6 +1652,8 @@ export async function getVendorLedger(run: Run, vendorPublicId: string): Promise
         debit: n(r.debit),
         credit: n(r.credit),
         balance,
+        dueDate: (r.due_date as string | null) ?? null,
+        overdue: r.overdue as boolean,
       });
     }
     return { entries, closingBalance: balance };

@@ -1,0 +1,21 @@
+-- ============================================================================
+-- 0034_ensure_no_roles_manage
+--
+-- Replaces a broken hand-written migration that was previously placed at this
+-- number (it inserted into the `roles` table using columns that belong to
+-- `permissions` instead — key/module/label are not columns on `roles`, see
+-- 0002_branches_users_rbac.sql — so it would have failed to apply).
+--
+-- Restating the actual rule from 0033: there is no roles.manage permission.
+-- Creating and deleting roles is hardcoded super-admin-only in
+-- permissions/routes.ts, not delegable via any permission key. This
+-- migration just re-asserts that cleanly and is safe to run even if 0033
+-- already removed it (idempotent no-op in that case).
+--
+-- Reassigning an EXISTING role to a staff member is a related but separate
+-- concern, handled in staff/routes.ts with its own hardcoded check
+-- (super-admin OR the literal branch_manager role) — not a permission key,
+-- and nothing for this migration to touch.
+-- ============================================================================
+
+DELETE FROM permissions WHERE key = 'roles.manage';

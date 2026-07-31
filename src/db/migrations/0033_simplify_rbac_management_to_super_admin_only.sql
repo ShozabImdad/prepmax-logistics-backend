@@ -1,0 +1,24 @@
+-- ============================================================================
+-- 0033_simplify_rbac_management_to_super_admin_only
+--
+-- Rolling back most of 0030/0031: managing the RBAC system itself (creating/
+-- deleting roles, and toggling what permissions a role grants) goes back to
+-- being strictly super-admin-only, not delegable. Too much surface area for
+-- too little benefit — a manager holding roles.manage was accidentally
+-- entangled with unrelated staff-creation logic (see accounts/routes.ts and
+-- staff/routes.ts changes in this same pass), which is exactly the kind of
+-- bug this simplification is meant to prevent going forward.
+--
+-- What's REMOVED from the grantable catalog (cascades role_permissions):
+--   permissions.view, permissions.manage  — toggling/viewing role grants
+--   roles.manage                          — creating/deleting roles
+--
+-- What STAYS grantable:
+--   roles.view — the role list only (id/name/isSystem), no grants shown.
+--   Lets a delegated manager's staff-creation role selector be non-empty
+--   without exposing or touching anything about what those roles can do.
+--
+-- Safe to re-run: idempotent.
+-- ============================================================================
+
+DELETE FROM permissions WHERE key IN ('permissions.view', 'permissions.manage', 'roles.manage');
