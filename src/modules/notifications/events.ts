@@ -22,6 +22,7 @@ export type DomainEvent =
   | { kind: "order_created"; orderId: string; branchId: string; createdVia: "customer" | "staff" }
   | { kind: "order_approved"; orderId: string; branchId: string }
   | { kind: "order_activated"; orderId: string; branchId: string }
+  |{ kind: "order_out_for_delivery"; orderId: string; branchId: string; statusText: string }
   | { kind: "order_delivered"; orderId: string; branchId: string }
   | { kind: "order_exception"; orderId: string; branchId: string; statusText: string }
   | { kind: "order_cancelled"; orderId: string; branchId: string };
@@ -201,7 +202,19 @@ async function handleEvent(event: DomainEvent): Promise<void> {
       );
       return;
     }
-    case "order_delivered": {
+
+    case "order_out_for_delivery": {
+      const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
+      if (!info) return;
+      await emailCustomer(event.branchId, event.orderId, info, "out_for_delivery", event.statusText);
+     await notifyCustomerPortal(
+        event.branchId, info, "order_out_for_delivery",
+       `Your shipment ${info.trackingCode} is out for delivery today.`,
+        event.orderId,
+      );
+      return;
+    }
+     case "order_delivered": {
       const info = await withBranch(event.branchId, (sql) => loadOrderInfo(sql, event.orderId));
       if (!info) return;
       await emailCustomer(event.branchId, event.orderId, info, "delivered");

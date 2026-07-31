@@ -279,6 +279,8 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       if (activeResult.status !== prevStatus) {
         if (activeResult.status === "delivered") {
           emitEvent({ kind: "order_delivered", orderId, branchId: activeLeg.branchId });
+          } else if (activeResult.status === "out_for_delivery") {
+          emitEvent({ kind: "order_out_for_delivery", orderId, branchId: activeLeg.branchId, statusText: activeResult.statusText });
         } else if (activeResult.status === "exception") {
           emitEvent({ kind: "order_exception", orderId, branchId: activeLeg.branchId, statusText: activeResult.statusText });
         }

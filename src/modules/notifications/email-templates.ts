@@ -28,6 +28,7 @@ const LOGO_CID = "prepmax-logo";
 export type CustomerEmailTemplate =
   | "booking_received"
   | "order_confirmed"
+  | "out_for_delivery"
   | "delivered"
   | "exception"
   | "cancelled";
@@ -196,11 +197,26 @@ export function renderCustomerEmail(
         html: shell(
           "Your shipment is confirmed",
           `<p style="margin:0 0 10px;">Hi ${name},</p>
-           <p style="margin:0;">Good news — your shipment has been confirmed and is now trackable. You can follow its progress anytime using the button below.</p>`,
+           <p style="margin:0;">Good news,your shipment has been confirmed and is now trackable. You can follow its progress anytime using the button below.</p>`,
           code,
           statusPill("Confirmed"),
         ),
       };
+
+
+case "out_for_delivery":
+      return {
+        subject: `Out for delivery today (${code})`,
+        attachments,
+        html: shell(
+          "Out for delivery today",
+          `<p style="margin:0 0 10px;">Hi ${name},</p>
+           <p style="margin:0;">Good news,your shipment <strong style="color:${INK};">${esc(code)}</strong> is out for delivery today${vars.statusText ? `: <em>${esc(vars.statusText)}</em>` : "."}</p>`,
+          code,
+          statusPill("Out for delivery", "ink"),
+        ),
+      };
+      
     case "delivered":
       return {
         subject: `Your parcel was delivered (${code})`,
