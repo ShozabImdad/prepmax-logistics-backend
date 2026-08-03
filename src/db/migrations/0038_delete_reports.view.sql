@@ -1,0 +1,1 @@
+DELETE FROM permissions WHERE key IN ('reports.view');

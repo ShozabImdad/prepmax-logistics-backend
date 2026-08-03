@@ -104,10 +104,21 @@ export async function editOrder(
   orderPublicId: string,
   input: EditOrderInput,
   divisorFallback = 5000,
+  opts: { customerId?: string } = {},
 ): Promise<void> {
   await run(async (sql) => {
     const order = await findOrderIdByPublicId(sql, orderPublicId);
     if (!order) throw new OrderError(404, "Order not found");
+
+    // Customer self-edit: scope to their own order, and only while it's
+    // still a pending booking request. Once staff have approved it (or it's
+    // been cancelled/otherwise moved on), the customer can no longer change it.
+    if (opts.customerId) {
+      if (order.customer_id !== opts.customerId) throw new OrderError(404, "Order not found");
+      if (order.order_status !== "pending_approval") {
+        throw new OrderError(409, `Order can no longer be edited (status: ${order.order_status})`);
+      }
+    }
 
     // Build a dynamic SET clause from provided fields. Map camelCase → column.
     const set: string[] = [];
@@ -443,6 +454,20 @@ export async function listOrders(
  * fields (declared cost basis stays, but created_by / carrier tracking numbers
  * are hidden from customers per plan §5).
  */
+/**
+ * Full order detail with boxes, items, and legs. `forCustomer` strips internal
+ * fields (declared cost basis stays, but created_by / carrier tracking numbers
+ * are hidden from customers per plan §5). When the order is still
+ * pending_approval the customer needs full sender/receiver/notes back so the
+ * edit form can be pre-filled.
+ */
+/**
+ * Full order detail with boxes, items, and legs. `forCustomer` strips internal
+ * fields (declared cost basis stays, but created_by / carrier tracking numbers
+ * are hidden from customers per plan §5). When the order is still
+ * pending_approval the customer needs full sender/receiver/notes back so the
+ * edit form can be pre-filled.
+ */
 export async function getOrderDetail(
   run: Run,
   orderPublicId: string,
@@ -461,6 +486,11 @@ export async function getOrderDetail(
     );
     const order = rows[0];
     if (!order) return null;
+
+    // Customer can edit only while the order is still a pending booking request.
+    // In that window we must return full contact details so the edit form can
+    // pre-fill every field. Once approved/moved on, we hide them again.
+    const canEdit = opts.forCustomer && order.order_status === "pending_approval";
 
     const boxes = await sql.query(
       `SELECT id, label, parcel_type, weight_kg, length_cm, width_cm, height_cm, volumetric_kg, chargeable_kg, sequence
@@ -514,13 +544,13 @@ export async function getOrderDetail(
       trackingCode: order.tracking_code,
       orderStatus: order.order_status,
       currentStatus: order.current_status,
-      // Customers must not see the real carrier; the cached status text is a
-      // carrier event string, so redact it for the portal (staff see it raw).
       currentStatusText: opts.forCustomer
         ? redactCarrier(order.current_status_text)
         : order.current_status_text,
       lastSyncedAt: order.last_synced_at,
-      sender: opts.forCustomer ? undefined : {
+      // Sender: hidden from customers UNLESS the order is pending_approval
+      // (the edit form needs it to pre-fill).
+      sender: (opts.forCustomer && !canEdit) ? undefined : {
         name: order.sender_name, company: order.sender_company, phone: order.sender_phone,
         email: order.sender_email, cnic: order.sender_cnic, ntn: order.sender_ntn,
         address: order.sender_address, address2: order.sender_address2, city: order.sender_city,
@@ -528,12 +558,12 @@ export async function getOrderDetail(
       },
       receiver: {
         name: order.receiver_name, city: order.receiver_city, country: order.receiver_country,
-        // full receiver contact only for staff
-        ...(opts.forCustomer ? {} : {
+        // Full receiver contact for staff, and for customers when editing a pending order.
+        ...((canEdit || !opts.forCustomer) ? {
           company: order.receiver_company, phone: order.receiver_phone, email: order.receiver_email,
           cnic: order.receiver_cnic, address: order.receiver_address, address2: order.receiver_address2,
           state: order.receiver_state, postcode: order.receiver_postcode,
-        }),
+        } : {}),
       },
       originCountry: order.origin_country,
       destinationCountry: order.destination_country,
@@ -551,10 +581,6 @@ export async function getOrderDetail(
       totalChargeableKg: Number(
         boxesOut.reduce((s, b) => s + (b.chargeableKg as number), 0).toFixed(3),
       ),
-      // For customers: redact carrier branding AND strip operational noise
-      // (flight numbers, linehaul/bag/weight detail, IMO/GPO postal tags) from
-      // the event text, and hide the carrier field entirely. Staff see it raw
-      // — full detail, no redaction or cleanup.
       trackingEvents: events.rows.map((e) => ({
         time: e.event_time, timeRaw: e.event_time_raw,
         location: opts.forCustomer ? cleanEventLocation(redactCarrier(e.location)) : e.location,
@@ -570,7 +596,6 @@ export async function getOrderDetail(
     if (!opts.forCustomer) {
       base.awbNumber = order.awb_number;
       base.createdVia = order.created_via;
-      // pricing / finance (staff only)
       base.price = order.price != null ? Number(order.price) : null;
       base.priceCurrency = order.price_currency;
       base.paymentStatus = order.payment_status;
@@ -581,8 +606,9 @@ export async function getOrderDetail(
       }));
       base.notes = order.notes;
     } else {
-      // Customer sees leg presence but NOT the raw carrier tracking numbers.
       base.legs = legs.rows.map((l) => ({ sequence: l.sequence, isActive: l.is_active }));
+      // Notes (instructions) are needed for the edit form pre-fill when pending.
+      if (canEdit) base.notes = order.notes;
     }
     return base;
   });

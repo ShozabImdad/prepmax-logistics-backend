@@ -299,6 +299,35 @@ portalOrderRouter.get(
   }),
 );
 
+// ── CUSTOMER: edit own booking request (only while pending_approval) ───────
+portalOrderRouter.patch(
+  "/:publicId",
+  requireCustomer,
+  asyncHandler(async (req, res) => {
+    const cust = req.auth!;
+    if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
+    const parsed = editOrderSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid edit", details: parsed.error.flatten() });
+    }
+    // Same rule as booking creation: customers don't set what the vendor
+    // charges, so pricing/payment fields are stripped even if sent.
+    const editInput = {
+      ...parsed.data,
+      price: undefined,
+      priceCurrency: undefined,
+      paymentStatus: undefined,
+      amountPaid: undefined,
+    };
+    try {
+      await editOrder(req.db!, param(req.params.publicId), editInput, undefined, { customerId: cust.customerId });
+      return res.json({ ok: true });
+    } catch (err) {
+      return handleOrderError(err, res);
+    }
+  }),
+);
+
 // ── CUSTOMER: own order detail (internal fields stripped) ───────────────────
 portalOrderRouter.get(
   "/:publicId",
