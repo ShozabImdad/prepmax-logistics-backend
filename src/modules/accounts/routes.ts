@@ -17,6 +17,7 @@ import {
   requireSuperAdmin,
 } from "../../middleware/auth.js";
 import { isStaff } from "../auth/types.js";
+import { sendCustomerCreatedEmail, buildCustomerLoginUrl } from "./customer-created-email.js";
 import { withoutContext, withSuperAdminAllBranches } from "../../db/pool.js";
 
 export const accountsRouter: Router = Router();
@@ -406,6 +407,16 @@ accountsRouter.post(
           companyName: c.company_name, ntn: c.ntn, address: c.address,
         };
       });
+
+      // Send credentials email to the new customer (fire-and-forget).
+      sendCustomerCreatedEmail({
+        to: row.email,
+        fullName: row.fullName,
+        email: parsed.data.email,
+        password: parsed.data.password,
+        loginUrl: buildCustomerLoginUrl(),
+      }).catch((e) => console.error("[accounts] Failed to send customer-created email:", e));
+
       return res.status(201).json({ customer: row });
     } catch (err) {
       return handleError(err, res, "A customer with that email already exists in this branch");

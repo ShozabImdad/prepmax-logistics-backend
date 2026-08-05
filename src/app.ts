@@ -12,7 +12,7 @@ import { documentRouter, portalDocumentRouter } from "./modules/documents/routes
 import { notificationRouter } from "./modules/notifications/routes.js";
 import { portalNotificationRouter } from "./modules/notifications/portal-routes.js";
 import { publicTrackingRouter } from "./modules/tracking/routes.js";
-import { publicAccountRequestRouter, accountRequestRouter } from "./modules/account-requests/routes.js";
+// account-requests module removed — customers are created manually by staff only.
 import { permissionsRouter } from "./modules/permissions/routes.js";
 import { staffRouter } from "./modules/staff/routes.js";
 import { analyticsRouter } from "./modules/analytics/routes.js";
@@ -36,7 +36,6 @@ export function createApp() {
 
   // Public endpoints (no auth).
   app.use("/api/track", publicTrackingRouter);
-  app.use("/api/account-requests", publicAccountRequestRouter);
 
   // Populate req.auth / req.db from the session cookie on every request.
   app.use(loadAuth);
@@ -50,7 +49,6 @@ export function createApp() {
   app.use("/api/portal/orders", portalDocumentRouter); // /:publicId/receipt.pdf
   app.use("/api/notifications", notificationRouter);
   app.use("/api/portal/notifications", portalNotificationRouter);
-  app.use("/api/account-requests", accountRequestRouter); // staff GET/status (public POST mounted above)
   app.use("/api/permissions", permissionsRouter);
   app.use("/api/staff", staffRouter);
   app.use("/api/analytics", analyticsRouter);
