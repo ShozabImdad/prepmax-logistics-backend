@@ -84,6 +84,10 @@ export const config = {
   mailFrom: optional("MAIL_FROM", "Prep Max Logistics <no-reply@example.com>"),
   // Base URL of the customer portal, used to build tracking links in emails.
   portalBaseUrl: optional("PORTAL_BASE_URL", "http://localhost:3000"),
+  // Base URL of the staff/admin frontend, used to build password-reset links
+  // for staff users. Falls back to portalBaseUrl until a dedicated staff
+  // frontend URL is configured.
+  staffPortalBaseUrl: optional("STAFF_PORTAL_BASE_URL", optional("PORTAL_BASE_URL", "http://localhost:3000")),
 
   // Admin/superuser connection — for role setup only.
   adminDb: {
