@@ -42,6 +42,8 @@ export interface ManifestRow {
   updatedAt: string;
   dispatchedAt: string | null;
   createdByCustomer: boolean; // true when a customer created this via the portal (§G)
+  customerPublicId: string | null; // which customer, when createdByCustomer — staff-facing only
+  customerName: string | null;
 }
 
 const MANIFEST_FIELDS = `
@@ -49,14 +51,17 @@ const MANIFEST_FIELDS = `
   v.public_id AS vendor_public_id, v.name AS vendor_name,
   m.manifest_date, m.status, m.total_shipments, m.total_weight_kg, m.notes,
   m.created_at, m.updated_at, m.dispatched_at,
-  (m.created_by_customer_id IS NOT NULL) AS created_by_customer
+  (m.created_by_customer_id IS NOT NULL) AS created_by_customer,
+  c.public_id AS customer_public_id, c.full_name AS customer_name
 `;
 
 // Every query selecting MANIFEST_FIELDS must join branches AS br and
-// LEFT JOIN vendors AS v — both aliases are referenced above.
+// LEFT JOIN vendors AS v and LEFT JOIN customers AS c — all three aliases
+// are referenced above.
 const MANIFEST_JOINS = `
   JOIN branches br ON br.id = m.branch_id
   LEFT JOIN vendors v ON v.id = m.vendor_id
+  LEFT JOIN customers c ON c.id = m.created_by_customer_id
 `;
 
 function mapManifest(r: Record<string, unknown>): ManifestRow {
@@ -75,6 +80,8 @@ function mapManifest(r: Record<string, unknown>): ManifestRow {
     updatedAt: r.updated_at as string,
     dispatchedAt: (r.dispatched_at as string | null) ?? null,
     createdByCustomer: Boolean(r.created_by_customer),
+    customerPublicId: (r.customer_public_id as string | null) ?? null,
+    customerName: (r.customer_name as string | null) ?? null,
   };
 }
 

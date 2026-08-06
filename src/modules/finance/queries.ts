@@ -19,6 +19,29 @@ import type {
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
+// Re-derive an invoice's amount_paid/status from its payments + any credit
+// notes referencing it. Shared by payment create/delete AND credit-note
+// create/update/delete, since both change what portion of the invoice is
+// considered settled. Draft/void invoices are left alone — status here only
+// applies to real unpaid/partial/paid documents.
+async function recomputeInvoiceStatus(sql: Sql, invoiceId: string): Promise<void> {
+  await sql.query(
+    `UPDATE invoices SET
+       amount_paid = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in'),
+       status = CASE
+         WHEN status IN ('draft', 'void') THEN status
+         WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
+              + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
+              >= total THEN 'paid'
+         WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
+              + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
+              > 0 THEN 'partial'
+         ELSE 'unpaid' END
+     WHERE id = $1`,
+    [invoiceId],
+  );
+}
+
 export class FinanceError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -648,6 +671,14 @@ export async function createInvoice(
       );
     }
 
+    // A newly-saved credit note settles part (or all) of the invoice it
+    // references — re-derive that invoice's amount_paid/status so it flips
+    // to 'paid' once payments + credits cover the total, instead of sitting
+    // stuck on 'partial' forever.
+    if (input.isCreditNote && referencedInvoiceId) {
+      await recomputeInvoiceStatus(sql, referencedInvoiceId);
+    }
+
     return fetchInvoiceBySql(sql, pid);
   });
 }
@@ -780,6 +811,18 @@ const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_c
     params.push(publicIdArg);
     await sql.query(`UPDATE invoices SET ${sets.join(", ")} WHERE public_id = $${params.length}`, params);
 
+    // Editing a credit note (its amount, its link, or voiding it) changes how
+    // much of the referenced invoice is settled — re-derive that invoice's
+    // status. Cover both the invoice it's newly linked to AND the one it was
+    // previously linked to, in case this edit re-linked or unlinked it.
+    const oldReferencedInvoiceId = inv.referenced_invoice_id;
+    if (isCreditNote && effectiveReferencedInvoiceId) {
+      await recomputeInvoiceStatus(sql, effectiveReferencedInvoiceId);
+    }
+    if (oldReferencedInvoiceId && oldReferencedInvoiceId !== effectiveReferencedInvoiceId) {
+      await recomputeInvoiceStatus(sql, oldReferencedInvoiceId);
+    }
+
     return fetchInvoiceBySql(sql, publicIdArg);
   });
 }
@@ -787,15 +830,23 @@ const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_c
 export async function deleteInvoice(run: Run, publicIdArg: string): Promise<void> {
   return run(async (sql) => {
     // Only allow delete on draft invoices with no payments allocated.
-    const { rows } = await sql.query<{ status: string; amount_paid: string }>(
-      "SELECT status, amount_paid FROM invoices WHERE public_id = $1",
+    const { rows } = await sql.query<{ id: string; status: string; amount_paid: string; is_credit_note: boolean; referenced_invoice_id: string | null }>(
+      "SELECT id, status, amount_paid, is_credit_note, referenced_invoice_id FROM invoices WHERE public_id = $1",
       [publicIdArg],
     );
     if (!rows[0]) throw new FinanceError(404, "Invoice not found");
     if (rows[0].status !== "draft" && Number(rows[0].amount_paid) > 0) {
       throw new FinanceError(400, "Cannot delete an invoice that has payments allocated; void it instead");
     }
+    const { is_credit_note: isCreditNote, referenced_invoice_id: referencedInvoiceId } = rows[0];
     await sql.query("DELETE FROM invoices WHERE public_id = $1", [publicIdArg]);
+
+    // Deleting a credit note removes it from the referenced invoice's
+    // "already credited" total — re-derive that invoice's status so it drops
+    // back from 'paid' to 'partial'/'unpaid' if it's no longer fully settled.
+    if (isCreditNote && referencedInvoiceId) {
+      await recomputeInvoiceStatus(sql, referencedInvoiceId);
+    }
   });
 }
 
@@ -1283,20 +1334,7 @@ export async function createPayment(
     // Re-derive parent document status (paid/partial/unpaid) so the ledger
     // stays consistent. Run inside the same transaction.
     if (invoiceId) {
-      await sql.query(
-      `UPDATE invoices SET
-           amount_paid = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in'),
-           status = CASE
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
-                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
-                  >= total THEN 'paid'
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
-                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
-                  > 0 THEN 'partial'
-             ELSE 'unpaid' END
-         WHERE id = $1`,
-        [invoiceId],
-      );
+      await recomputeInvoiceStatus(sql, invoiceId);
     }
     if (vendorBillId) {
       await sql.query(
@@ -1338,20 +1376,7 @@ export async function deletePayment(run: Run, publicIdArg: string): Promise<void
 
     // Re-derive parent status after deletion (mirror createPayment logic)
     if (invoiceId) {
-      await sql.query(
-        `UPDATE invoices SET
-           amount_paid = (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in'),
-           status = CASE
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
-                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
-                  >= total THEN 'paid'
-             WHEN (SELECT COALESCE(SUM(amount),0) FROM payments WHERE invoice_id = $1 AND direction = 'in')
-                  + (SELECT COALESCE(SUM(-cn.total),0) FROM invoices cn WHERE cn.referenced_invoice_id = $1 AND cn.is_credit_note AND cn.status <> 'void')
-                  > 0 THEN 'partial'
-             ELSE 'unpaid' END
-         WHERE id = $1`,
-        [invoiceId],
-      );
+      await recomputeInvoiceStatus(sql, invoiceId);
     }
     if (vendorBillId) {
       await sql.query(

@@ -16,6 +16,8 @@ import {
 } from "../../lib/session.js";
 import { generateResetToken, hashResetToken, RESET_TOKEN_TTL_MS } from "../../lib/reset-token.js";
 import { sendPasswordResetEmail, buildResetUrl } from "./reset-email.js";
+import { sendPasswordUpdatedEmail } from "./password-updated-email.js";
+import { config } from "../../config/env.js";
 import type { Principal, StaffPrincipal, CustomerPrincipal, StaffRole } from "./types.js";
 
 interface UserRow {
@@ -325,8 +327,8 @@ export async function changeOwnStaffPassword(
   newPassword: string,
 ): Promise<ChangePasswordError | null> {
   return db(async (sql) => {
-    const { rows } = await sql.query<{ password_hash: string }>(
-      `SELECT password_hash FROM users WHERE id = $1`,
+    const { rows } = await sql.query<{ password_hash: string; email: string; full_name: string }>(
+      `SELECT password_hash, email, full_name FROM users WHERE id = $1`,
       [userId],
     );
     const current = rows[0];
@@ -356,6 +358,16 @@ export async function changeOwnStaffPassword(
     // this request alive so the user isn't logged out by changing their own
     // password.
     await sql.query(`DELETE FROM sessions WHERE user_id = $1 AND id != $2`, [userId, currentSessionId]);
+
+    sendPasswordUpdatedEmail({
+      to: current.email,
+      fullName: current.full_name,
+      email: current.email,
+      password: newPassword,
+      loginUrl: config.staffPortalBaseUrl,
+      reason: "changed",
+    }).catch((e) => console.error("[auth] Failed to send staff password-changed confirmation email:", e));
+
     return null;
   });
 }
@@ -369,8 +381,8 @@ export async function changeOwnCustomerPassword(
   newPassword: string,
 ): Promise<ChangePasswordError | null> {
   return db(async (sql) => {
-    const { rows } = await sql.query<{ password_hash: string }>(
-      `SELECT password_hash FROM customers WHERE id = $1`,
+    const { rows } = await sql.query<{ password_hash: string; email: string; full_name: string }>(
+      `SELECT password_hash, email, full_name FROM customers WHERE id = $1`,
       [customerId],
     );
     const current = rows[0];
@@ -388,6 +400,16 @@ export async function changeOwnCustomerPassword(
     }
 
     await sql.query(`DELETE FROM sessions WHERE customer_id = $1 AND id != $2`, [customerId, currentSessionId]);
+
+    sendPasswordUpdatedEmail({
+      to: current.email,
+      fullName: current.full_name,
+      email: current.email,
+      password: newPassword,
+      loginUrl: config.portalBaseUrl,
+      reason: "changed",
+    }).catch((e) => console.error("[auth] Failed to send customer password-changed confirmation email:", e));
+
     return null;
   });
 }
@@ -467,9 +489,9 @@ export async function resetStaffPassword(
   // been cryptographically verified above, which is our authorization here,
   // so withSuperAdminAllBranches is the correct escape hatch — same as any
   // other legitimate cross-branch system write.
-  await withSuperAdminAllBranches(async (sql) => {
-    const updated = await sql.query(
-      `UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id`,
+  const updatedUser = await withSuperAdminAllBranches(async (sql) => {
+    const updated = await sql.query<{ id: string; email: string; full_name: string }>(
+      `UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, email, full_name`,
       [passwordHash, record.user_id],
     );
     if (updated.rowCount === 0) {
@@ -482,7 +504,20 @@ export async function resetStaffPassword(
       [record.user_id],
     );
     await sql.query(`DELETE FROM sessions WHERE user_id = $1`, [record.user_id]);
+    return updated.rows[0]!;
   });
+
+  // Confirmation email — same "here are your credentials" look as the
+  // customer-created welcome email (fire-and-forget, mustn't block the response).
+  sendPasswordUpdatedEmail({
+    to: updatedUser.email,
+    fullName: updatedUser.full_name,
+    email: updatedUser.email,
+    password: newPassword,
+    loginUrl: config.staffPortalBaseUrl,
+    reason: "reset",
+  }).catch((e) => console.error("[auth] Failed to send staff password-reset confirmation email:", e));
+
   return null;
 }
 
@@ -495,9 +530,9 @@ export async function resetCustomerPassword(
   if (!record || !record.customer_id) return "invalid_or_expired";
 
   const passwordHash = await hashPassword(newPassword);
-  await withSuperAdminAllBranches(async (sql) => {
-    const updated = await sql.query(
-      `UPDATE customers SET password_hash = $1 WHERE id = $2 RETURNING id`,
+  const updatedCustomer = await withSuperAdminAllBranches(async (sql) => {
+    const updated = await sql.query<{ id: string; email: string; full_name: string }>(
+      `UPDATE customers SET password_hash = $1 WHERE id = $2 RETURNING id, email, full_name`,
       [passwordHash, record.customer_id],
     );
     if (updated.rowCount === 0) {
@@ -509,6 +544,17 @@ export async function resetCustomerPassword(
       [record.customer_id],
     );
     await sql.query(`DELETE FROM sessions WHERE customer_id = $1`, [record.customer_id]);
+    return updated.rows[0]!;
   });
+
+  sendPasswordUpdatedEmail({
+    to: updatedCustomer.email,
+    fullName: updatedCustomer.full_name,
+    email: updatedCustomer.email,
+    password: newPassword,
+    loginUrl: config.portalBaseUrl,
+    reason: "reset",
+  }).catch((e) => console.error("[auth] Failed to send customer password-reset confirmation email:", e));
+
   return null;
 }
