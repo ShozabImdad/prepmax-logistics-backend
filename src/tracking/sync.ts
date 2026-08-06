@@ -30,7 +30,42 @@ export interface LegSyncResult {
   status: "not_found" | "synced" | "error";
   normalizedStatus?: string;
   newEvents?: number;
-  error?: string;
+  error?: string;        // raw technical error — for logs/debugging only, never shown to users
+  userMessage?: string;  // clean, human-friendly summary safe to show staff (see legUserMessage)
+}
+
+// Friendly display name per carrier code (falls back to the raw code upper-cased).
+const CARRIER_DISPLAY: Record<string, string> = {
+  dpd: "DPD",
+  "smartcargo-apx": "APX / SmartCargo",
+  snwwe: "SkyNet",
+  dhl: "DHL",
+  ups: "UPS",
+  fedex: "FedEx",
+  pakpost: "Pakistan Post",
+  emx: "EMX",
+};
+
+function carrierDisplay(carrier: string): string {
+  return CARRIER_DISPLAY[carrier] ?? carrier.toUpperCase();
+}
+
+// Turn a per-leg sync outcome into a clean, non-technical message safe to show
+// staff. Never leaks raw adapter errors (timeouts, stack traces, HTTP codes) —
+// those stay in LegSyncResult.error for logs only.
+function legUserMessage(carrier: string, status: LegSyncResult["status"], newEvents = 0): string {
+  const name = carrierDisplay(carrier);
+  switch (status) {
+    case "synced":
+      return newEvents > 0
+        ? `${name}: ${newEvents} new update${newEvents === 1 ? "" : "s"}`
+        : `${name}: up to date`;
+    case "not_found":
+      return `${name}: no tracking information available yet`;
+    case "error":
+    default:
+      return `${name}: tracking is temporarily unavailable`;
+  }
 }
 
 export interface SyncResult {
@@ -212,6 +247,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         legResults.push({
           legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
           isActive: leg.isActive, status: "error", error: `no adapter for "${leg.carrier}"`,
+          userMessage: legUserMessage(leg.carrier, "error"),
         });
         continue;
       }
@@ -224,6 +260,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
           legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
           isActive: leg.isActive, status: "error",
           error: e instanceof Error ? e.message : String(e),
+          userMessage: legUserMessage(leg.carrier, "error"),
         });
         continue;
       }
@@ -232,6 +269,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         legResults.push({
           legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
           isActive: leg.isActive, status: "not_found",
+          userMessage: legUserMessage(leg.carrier, "not_found"),
         });
         continue;
       }
@@ -242,6 +280,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         legId: leg.legId, carrier: leg.carrier, sequence: leg.sequence,
         isActive: leg.isActive, status: "synced",
         normalizedStatus: result.status, newEvents,
+        userMessage: legUserMessage(leg.carrier, "synced", newEvents),
       });
 
       // Handoff detection stays scoped to the active APX leg only, same rule
