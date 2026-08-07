@@ -6,12 +6,15 @@
 //   GET /api/portal/finance/summary          — outstanding balance, totals
 //   GET /api/portal/finance/invoices         — this customer's invoices
 //   GET /api/portal/finance/invoices/:publicId — single invoice (ownership checked)
+//   GET /api/portal/finance/invoices/:publicId/pdf — invoice PDF (ownership checked)
 //   GET /api/portal/finance/payments         — this customer's payment history
 
 import { Router } from "express";
 import { asyncHandler } from "../../lib/http.js";
 import { requireCustomer } from "../../middleware/auth.js";
 import { isCustomer } from "../auth/types.js";
+import { htmlToPdf } from "../documents/pdf.js";
+import { invoiceHtml } from "./templates.js";
 import { FinanceError, listInvoices, getInvoice, listPayments, getCustomerLedger } from "./queries.js";
 
 export const portalFinanceRouter: Router = Router();
@@ -89,6 +92,32 @@ portalFinanceRouter.get(
         return res.status(404).json({ error: "Invoice not found" });
       }
       return res.json({ invoice });
+    } catch (err) {
+      return handleFinanceError(err, res);
+    }
+  }),
+);
+
+// ── Invoices (PDF) — ownership enforced, not just branch RLS ────────────────
+portalFinanceRouter.get(
+  "/invoices/:publicId/pdf",
+  requireCustomer,
+  asyncHandler(async (req, res) => {
+    const cust = req.auth!;
+    if (!isCustomer(cust)) return res.status(403).json({ error: "Customer only" });
+    try {
+      const invoice = await getInvoice(req.db!, req.params.publicId as string);
+      if (invoice.customerPublicId !== cust.publicId) {
+        // Don't leak existence of another customer's invoice.
+        return res.status(404).json({ error: "Invoice not found" });
+      }
+      if (invoice.isCreditNote) {
+        return res.status(400).json({ error: "Credit notes don't have a PDF — only debit invoices do" });
+      }
+      const pdf = await htmlToPdf(invoiceHtml(invoice), { format: "A4" });
+      res.setHeader("content-type", "application/pdf");
+      res.setHeader("content-disposition", `inline; filename="Invoice-${invoice.invoiceNo}.pdf"`);
+      return res.end(pdf);
     } catch (err) {
       return handleFinanceError(err, res);
     }

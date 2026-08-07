@@ -240,7 +240,7 @@ export async function attachLegs(run: Run, orderPublicId: string, legs: LegInput
     let newStatus = order.order_status;
     let justActivated = false;
     if (order.order_status === "awaiting_carrier") {
-      const range = lookupDeliveryRange(order.service_type);
+      const range = await lookupDeliveryRange(sql, order.service_type);
       if (range) {
         const today = new Date();
         const min = toDateOnly(addWorkingDays(today, range.minDays));
@@ -366,6 +366,8 @@ export interface OrderListRow {
   receiverCity: string | null;
   receiverCountry: string | null;
   createdVia: string;           // "customer" | "staff" — flags booking requests
+  customerId: string | null;    // customer's public_id, when the order belongs to a customer
+  customerName: string | null;  // customer's full name, when the order belongs to a customer
   createdAt: string;
 }
 
@@ -429,10 +431,13 @@ export async function listOrders(
     const offsetIdx = params.length;
 
     const { rows } = await sql.query(
-      `SELECT public_id, tracking_code, order_status, current_status,
-              receiver_city, receiver_country, created_via, created_at
-         FROM orders ${where}
-         ORDER BY created_at DESC
+      `SELECT orders.public_id, orders.tracking_code, orders.order_status, orders.current_status,
+              orders.receiver_city, orders.receiver_country, orders.created_via, orders.created_at,
+              customers.public_id AS customer_public_id, customers.full_name AS customer_name
+         FROM orders
+         LEFT JOIN customers ON customers.id = orders.customer_id
+         ${where}
+         ORDER BY orders.created_at DESC
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       params,
     );
@@ -444,6 +449,8 @@ export async function listOrders(
       receiverCity: r.receiver_city,
       receiverCountry: r.receiver_country,
       createdVia: r.created_via,
+      customerId: r.customer_public_id ?? null,
+      customerName: r.customer_name ?? null,
       createdAt: r.created_at,
     }));
   });
@@ -474,14 +481,17 @@ export async function getOrderDetail(
   opts: { customerId?: string; forCustomer: boolean },
 ): Promise<Record<string, unknown> | null> {
   return run(async (sql) => {
-    const conds = ["public_id = $1"];
+    const conds = ["orders.public_id = $1"];
     const params: unknown[] = [orderPublicId];
     if (opts.customerId) {
       params.push(opts.customerId);
-      conds.push(`customer_id = $${params.length}`);
+      conds.push(`orders.customer_id = $${params.length}`);
     }
     const { rows } = await sql.query(
-      `SELECT * FROM orders WHERE ${conds.join(" AND ")}`,
+      `SELECT orders.*, customers.public_id AS customer_public_id, customers.full_name AS customer_name
+         FROM orders
+         LEFT JOIN customers ON customers.id = orders.customer_id
+        WHERE ${conds.join(" AND ")}`,
       params,
     );
     const order = rows[0];
@@ -596,6 +606,8 @@ export async function getOrderDetail(
     if (!opts.forCustomer) {
       base.awbNumber = order.awb_number;
       base.createdVia = order.created_via;
+      base.customerId = order.customer_public_id ?? null;
+      base.customerName = order.customer_name ?? null;
       base.price = order.price != null ? Number(order.price) : null;
       base.priceCurrency = order.price_currency;
       base.paymentStatus = order.payment_status;

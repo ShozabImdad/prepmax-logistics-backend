@@ -24,6 +24,7 @@ import { portalManifestRouter } from "./modules/manifest/portal-routes.js";
 import { deManifestRouter } from "./modules/de-manifests/routes.js";
 import { quoteRouter, portalQuoteRouter } from "./modules/quotes/routes.js";
 import { contactsRouter, portalContactsRouter } from "./modules/contacts/routes.js";
+import { courierRouter, portalCourierRouter } from "./modules/couriers/routes.js";
 
 export function createApp() {
   const app = express();
@@ -63,6 +64,8 @@ export function createApp() {
   app.use("/api/portal/quotes", portalQuoteRouter);
   app.use("/api/contacts", contactsRouter);
   app.use("/api/portal/contacts", portalContactsRouter);
+  app.use("/api/couriers", courierRouter);
+  app.use("/api/portal/couriers", portalCourierRouter);
 
   // 404 for unknown API routes.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));

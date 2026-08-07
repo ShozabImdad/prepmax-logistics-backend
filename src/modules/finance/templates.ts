@@ -39,14 +39,22 @@ function statusBadge(status: string): string {
 // look precisely: black borders, no brand-blue fills, same box/grid/table
 // vocabulary. This block only adds the handful of classes those templates
 // don't already define (line-item + totals tables, status badge, notes box).
+//
+// FIX: .items now uses table-layout: fixed with explicit column widths, and
+// cells wrap long words. Previously there was no width ceiling, so a long
+// description stretched the table and pushed Qty/Unit/Amount out of the row.
 // ============================================================================
 const FINANCE_CSS = `
   .top { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1.5px solid #000; padding-bottom: 10px; margin-bottom: 14px; }
   .doc-sub { text-align: right; margin-top: 4px; }
   .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; }
-  .items th, .items td { border: 1px solid #333; padding: 4px 6px; text-align: left; vertical-align: top; }
+  .items { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  .items th, .items td { border: 1px solid #333; padding: 4px 6px; text-align: left; vertical-align: top; word-wrap: break-word; overflow-wrap: break-word; }
   .items th { background: #f0f3f8; font-size: 8px; text-transform: uppercase; letter-spacing: 0.4px; }
   .items tr:nth-child(even) td { background: #fafafa; }
+  .items th:first-child, .items td:first-child { width: 46%; }
+  .items th.num, .items td.num { width: 18%; }
+  .items .ref { display: block; margin-top: 2px; font-size: 8px; color: #777; }
   .totals { width: 260px; margin-left: auto; margin-top: 10px; }
   .totals td { padding: 3px 6px; }
   .totals .grand td { font-weight: 700; background:#f7f9fc; border-top: 1px solid #333; padding-top: 6px; }
@@ -68,11 +76,16 @@ function brandHeader(branchName: string | null, branchCity: string | null): stri
 // ============================================================================
 // Only ever called for debit invoices — credit notes are excluded at the
 // route level (see finance/routes.ts), so no CN branching is needed here.
+//
+// FIX: line items now surface their order reference (it.orderPublicId), the
+// same way vendorBillHtml already does below. Make sure the query populating
+// InvoiceRow.items actually selects orderPublicId — if the field doesn't
+// exist on the row type/query yet, this renders nothing until it's added.
 export function invoiceHtml(inv: InvoiceRow): string {
   const items = inv.items ?? [];
-  const rows = (items.length ? items : [{ description: "—", quantity: 0, unitPrice: 0, lineTotal: 0 }])
-    .map((it) => `<tr>
-        <td>${esc(it.description)}</td>
+  const rows = (items.length ? items : [{ description: "—", quantity: 0, unitPrice: 0, lineTotal: 0, orderPublicId: null }])
+    .map((it: any) => `<tr>
+        <td>${esc(it.description)}${it.orderPublicId ? `<span class="ref">Order ${esc(it.orderPublicId)}</span>` : ""}</td>
         <td class="num">${it.quantity}</td>
         <td class="num">${money(it.unitPrice, inv.currency)}</td>
         <td class="num">${money(it.lineTotal, inv.currency)}</td>
@@ -134,7 +147,7 @@ export function vendorBillHtml(bill: VendorBillRow): string {
   const items = bill.items ?? [];
   const rows = (items.length ? items : [{ description: "—", amount: 0, orderPublicId: null }])
     .map((it) => `<tr>
-        <td>${esc(it.description)}${it.orderPublicId ? ` <span class="muted">(Order ${esc(it.orderPublicId)})</span>` : ""}</td>
+        <td>${esc(it.description)}${it.orderPublicId ? `<span class="ref">Order ${esc(it.orderPublicId)}</span>` : ""}</td>
         <td class="num">${money(it.amount, bill.currency)}</td>
       </tr>`).join("");
 
