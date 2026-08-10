@@ -25,6 +25,7 @@ import {
   editLeg,
   deleteLeg,
   listOrders,
+  listCarriers,        
   getOrderDetail,
   resolveOrderId,
   editOrder,
@@ -86,12 +87,22 @@ orderRouter.get(
     const search = typeof req.query.q === "string" ? req.query.q : undefined;
     const createdVia = typeof req.query.createdVia === "string" ? req.query.createdVia : undefined;
     const customerPublicId = typeof req.query.customerPublicId === "string" ? req.query.customerPublicId : undefined;
-    const orders = await listOrders(req.db!, { status, createdVia, search, customerPublicId });
+    const carrier = typeof req.query.carrier === "string" ? req.query.carrier : undefined; // ← add
+    const orders = await listOrders(req.db!, { status, createdVia, search, customerPublicId, carrier }); // ← pass it
     return res.json({ orders });
   }),
 );
-
 // ── STAFF: order detail ─────────────────────────────────────────────────────
+orderRouter.get(
+  "/carriers",
+  requireStaff,
+  requirePermission("orders.view"),
+  asyncHandler(async (req, res) => {
+    const carriers = await listCarriers(req.db!);
+    return res.json({ carriers });
+  }),
+);
+
 orderRouter.get(
   "/:publicId",
   requireStaff,

@@ -378,7 +378,7 @@ export interface OrderListRow {
  */
 export async function listOrders(
   run: Run,
-  opts: { customerId?: string; customerPublicId?: string; status?: string; createdVia?: string; search?: string; limit?: number; offset?: number },
+  opts: { customerId?: string; customerPublicId?: string; status?: string; createdVia?: string; search?: string; carrier?: string; limit?: number; offset?: number },
 ): Promise<OrderListRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
@@ -422,6 +422,16 @@ export async function listOrders(
         OR COALESCE(sender_company, '') ILIKE ${p}
         OR COALESCE(sender_city, '') ILIKE ${p}
         OR COALESCE(sender_country, '') ILIKE ${p}
+      )`);
+    }
+      const carrier = opts.carrier?.trim();
+    if (carrier) {
+      params.push(carrier);
+      const p = `$${params.length}`;
+      conds.push(`EXISTS (
+        SELECT 1 FROM shipment_legs sl
+         WHERE sl.order_id = orders.id
+           AND sl.carrier = ${p}
       )`);
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
@@ -623,5 +633,15 @@ export async function getOrderDetail(
       if (canEdit) base.notes = order.notes;
     }
     return base;
+  });
+}
+
+/** Distinct carrier names currently attached to any order's legs, for the admin filter dropdown. */
+export async function listCarriers(run: Run): Promise<string[]> {
+  return run(async (sql) => {
+    const { rows } = await sql.query<{ carrier: string }>(
+      `SELECT DISTINCT carrier FROM shipment_legs WHERE carrier IS NOT NULL AND carrier <> '' ORDER BY carrier`,
+    );
+    return rows.map((r) => r.carrier);
   });
 }
