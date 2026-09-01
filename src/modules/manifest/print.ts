@@ -95,15 +95,15 @@ export function manifestHtml(
             <td>${esc(s.senderName ?? "—")}</td>
             <td>${esc(s.receiverName ?? "—")}</td>
             <td>${esc(s.destination ?? "—")}</td>
-            <td class="num">${s.weightKg.toFixed(2)}</td>
-            <td class="num">${s.charges.toFixed(2)} ${esc(s.currency)}</td>
             <td>${esc(s.orderStatus)}</td>
           </tr>`,
         )
         .join("")
-    : `<tr><td colspan="8" class="muted" style="text-align:center;">No shipments added</td></tr>`;
+    : `<tr><td colspan="6" class="muted" style="text-align:center;">No shipments added</td></tr>`;
 
-  const totalCharges = m.shipments.reduce((sum, s) => sum + s.charges, 0);
+  // Per-shipment weight/charges are still computed by queries.ts
+  // (ManifestShipmentRow.weightKg/.charges/.currency) for downstream use,
+  // but are intentionally not surfaced in the printed/PDF view.
 
   return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}</style></head><body>
   <div class="page">
@@ -126,7 +126,6 @@ export function manifestHtml(
         <div class="k">Manifest date</div><div>${fmtDate(m.manifestDate)}</div>
         <div class="k">Vendor / Carrier</div><div>${esc(m.vendorName ?? "—")}</div>
         <div class="k">Total shipments</div><div><strong>${m.totalShipments}</strong></div>
-        <div class="k">Total weight</div><div><strong>${m.totalWeightKg.toFixed(2)} kg</strong></div>
         ${m.dispatchedAt ? `<div class="k">Dispatched at</div><div>${fmtDate(m.dispatchedAt)}</div>` : ""}
         ${m.notes ? `<div class="k">Notes</div><div>${esc(m.notes)}</div>` : ""}
       </div>
@@ -134,20 +133,16 @@ export function manifestHtml(
 
     <table class="cargo">
       <thead><tr>
-        <th style="width:4%">#</th>
-        <th style="width:14%">Tracking</th>
-        <th style="width:15%">Sender</th>
-        <th style="width:15%">Receiver</th>
-        <th style="width:17%">Destination</th>
-        <th style="width:9%" class="num">Wt (kg)</th>
-        <th style="width:12%" class="num">Charges</th>
-        <th style="width:9%">Status</th>
+        <th style="width:5%">#</th>
+        <th style="width:18%">Tracking</th>
+        <th style="width:19%">Sender</th>
+        <th style="width:19%">Receiver</th>
+        <th style="width:25%">Destination</th>
+        <th style="width:14%">Status</th>
       </tr></thead>
       <tbody>${rows}
         <tr class="totrow">
           <td colspan="5" class="num">Total</td>
-          <td class="num">${m.totalWeightKg.toFixed(2)}</td>
-          <td class="num">${totalCharges.toFixed(2)}</td>
           <td></td>
         </tr>
       </tbody>
@@ -173,18 +168,19 @@ function csvCell(v: unknown): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** Render the shipment list as CSV — the "export Excel" fallback (Q4: CSV opens in Excel, no new dependency). */
+/** Render the shipment list as CSV — the "export Excel" fallback (Q4: CSV opens in Excel, no new dependency).
+ *  Weight/charges are not exported (display-only removal); the underlying
+ *  values remain available on ManifestShipmentRow for downstream code. */
 export function manifestShipmentsCsv(m: ManifestRow & { shipments: ManifestShipmentRow[] }): string {
   const header = [
-    "Tracking Code", "Sender", "Receiver", "Destination",
-    "Weight (kg)", "Charges", "Currency", "Order Status",
+    "Tracking Code", "Sender", "Receiver", "Destination", "Order Status",
   ];
   const lines = [header.map(csvCell).join(",")];
   for (const s of m.shipments) {
     lines.push(
       [
         s.trackingCode, s.senderName ?? "", s.receiverName ?? "", s.destination ?? "",
-        s.weightKg.toFixed(2), s.charges.toFixed(2), s.currency, s.orderStatus,
+        s.orderStatus,
       ]
         .map(csvCell)
         .join(","),
@@ -194,18 +190,17 @@ export function manifestShipmentsCsv(m: ManifestRow & { shipments: ManifestShipm
 }
 
 export function manifestShipmentsExcel(m: ManifestRow & { shipments: ManifestShipmentRow[] }): Buffer {
+  // Weight/charges/currency columns are intentionally omitted from the export
+  // (display-only removal). The underlying values stay on ManifestShipmentRow
+  // so other code paths that rely on them are unaffected.
   const header = [
-    "Tracking Code", "Sender", "Receiver", "Destination",
-    "Weight (kg)", "Charges", "Currency", "Order Status",
+    "Tracking Code", "Sender", "Receiver", "Destination", "Order Status",
   ];
   const rows = m.shipments.map((s) => [
     s.trackingCode,
     s.senderName ?? "",
     s.receiverName ?? "",
     s.destination ?? "",
-    Number(s.weightKg.toFixed(2)),
-    Number(s.charges.toFixed(2)),
-    s.currency,
     s.orderStatus,
   ]);
 
@@ -214,8 +209,7 @@ export function manifestShipmentsExcel(m: ManifestRow & { shipments: ManifestShi
 
   // reasonable column widths, mirrors the CSV column order
   ws["!cols"] = [
-    { wch: 16 }, { wch: 20 }, { wch: 20 }, { wch: 22 },
-    { wch: 10 }, { wch: 10 }, { wch: 8 }, { wch: 14 },
+    { wch: 16 }, { wch: 20 }, { wch: 20 }, { wch: 22 }, { wch: 14 },
   ];
 
   const wb = XLSX.utils.book_new();
@@ -228,7 +222,6 @@ export function manifestShipmentsExcel(m: ManifestRow & { shipments: ManifestShi
     ["Vendor / Carrier", m.vendorName ?? "—"],
     ["Status", m.status],
     ["Total Shipments", m.totalShipments],
-    ["Total Weight (kg)", m.totalWeightKg],
     ["Dispatched At", m.dispatchedAt ?? "—"],
   ];
   const summaryWs = XLSX.utils.aoa_to_sheet(summary);

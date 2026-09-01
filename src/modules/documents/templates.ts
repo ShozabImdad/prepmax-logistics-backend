@@ -55,6 +55,15 @@ function esc(s: unknown): string {
   );
 }
 
+// Urdu legal/terms notice printed at the bottom of the AWB, Receipt, and
+// Shipping Bill. Kept as a single constant so all three templates render
+// identical wording. NOTE: this string is Urdu (RTL) text, not markup — it
+// is inserted via ${URDU_NOTICE} inside elements that already carry
+// dir="rtl" styling (.urdu-notice / .urdu-notice-sm), so it is intentionally
+// not passed through esc() beyond what's already safe plain text.
+const URDU_NOTICE =
+  "ٹوٹنے والی اشیاء کی کوئی گارنٹی نہیں ۔۔۔ پارسل گم ہونے کی صورت میں زیادہ سے زیادہ 100 ڈالر کلیم کمپنی ادا کرے گی نیز انشورنس کے بغیر کاغذات کے گم ہونے کی صورت میں صرف بکنگ کی رقم کی واپسی ہوگی ۔ ۔ ۔ اگر اس ملک کی گورنمنٹ یا اس ملک کا کستم کسی قسم کا کوئی ٹیکس ڈیوٹی لگاتا ہے تو وہ کسٹمر ادا کرے گا۔ میں نے اوپر ذکر کردہ تمام شرائط و ضوابط کو پڑھ لیا ہے اور اس سے اتفاق کرتا ہوں۔";
+
 // Customer/carrier-facing label for an order's declared contents.
 // "documents" prints exactly as before (unchanged); any non-documents value
 // (currently just "merchandise") prints as "Non-Docs/Parcel" instead of the
@@ -133,6 +142,18 @@ export const SHARED_CSS = `
   .sign { display:grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 18px; }
   .sign .line { border-top: 1px solid #333; padding-top: 3px; font-size: 9px; color:#555; margin-top:34px; }
   .foot { margin-top: 14px; font-size: 8px; color:#888; border-top: 1px solid #ddd; padding-top: 6px; }
+  .urdu-notice {
+    direction: rtl;
+    text-align: right;
+    unicode-bidi: isolate;
+    font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", "Segoe UI", Arial, sans-serif;
+    font-size: 9px;
+    line-height: 1.75;
+    color: #222;
+    margin-top: 10px;
+    padding-top: 6px;
+    border-top: 1px solid #ccc;
+  }
 `;
 
 // ============================================================================
@@ -257,6 +278,8 @@ export function awbHtml(d: DocData, barcode: string): string {
       </div>
     </div>
 
+    <div class="urdu-notice">${URDU_NOTICE}</div>
+
     <div class="foot">
       Issued by Prep Max Logistics · ${esc(d.branchName)}, ${esc(d.branchCity)} · Place of Execution: ${esc(d.branchCity)} · Generated ${fmtDate(new Date().toISOString())}.
     </div>
@@ -339,6 +362,8 @@ export function receiptHtml(d: DocData, barcode: string): string {
       Track your shipment anytime at Prep Max Logistics using tracking number <strong>${esc(d.trackingCode)}</strong>.
     </div>
 
+    <div class="urdu-notice">${URDU_NOTICE}</div>
+
     <div class="foot">
       Thank you for shipping with Prep Max Logistics. This receipt confirms your booking${d.notes ? ` · Note: ${esc(d.notes)}` : ""}.
     </div>
@@ -412,6 +437,17 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
 .bill .barcodewrap { position:relative; padding:10px 8px; display:flex; align-items:center; justify-content:space-between; }
 .bill .barcodewrap .barcode-img { height:86px; width:auto; max-width:100%; }
 .bill .barcodewrap .logo-img { position:absolute; right:8px; bottom:0px;top:10px; height:32px; width:auto; object-fit:contain; opacity:0.85; }
+.bill .urdu-notice-sm {
+  direction: rtl;
+  text-align: right;
+  unicode-bidi: isolate;
+  font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", Arial, sans-serif;
+  font-size: 6px;
+  line-height: 1.35;
+  color: #333;
+  padding: 3px 6px 4px;
+  border-top: 1px solid #000;
+}
   </style></head><body>
   <div class="label-page">
     <div class="bill">
@@ -479,6 +515,7 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
         <img class="barcode-img" src="${barcode}" alt="barcode">
         ${logoDataUri ? `<img class="logo-img" src="${logoDataUri}" alt="Prep Max Logistics">` : ""}
       </div>
+      <div class="urdu-notice-sm">${URDU_NOTICE}</div>
     </div>
   </div>
   </body></html>`;
