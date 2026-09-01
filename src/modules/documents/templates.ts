@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Candidate locations for the logo, checked in order. process.cwd()-based
+// Candidate locations for assets, checked in order. process.cwd()-based
 // paths cover "started from project root" (most deploys, e.g. `node
 // dist/index.js` run from the repo root). __dirname-based paths cover cases
 // where cwd isn't the project root (e.g. some PM2/serverless setups) by
@@ -47,6 +47,49 @@ function loadLogoDataUri(): string {
 export const logoDataUri = loadLogoDataUri();
 
 // ============================================================================
+// URDU WEBFONT PRE-LOADING
+// Production servers usually have NO Nastaliq font installed, which makes the
+// Urdu notice render as boxes (tofu). We embed the font as a Base64 data-URI
+// @font-face so it works on every server, exactly like the logo. Drop the
+// font file at src/public/fonts/ (or public/fonts/). Get it from:
+// https://fonts.google.com/noto/specimen/Noto+Nastaliq+Urdu
+// ============================================================================
+function loadUrduFontFaceCss(): string {
+  const candidates: Array<{ file: string; family: string; mime: string; format: string; weight: string }> = [
+    // Static Regular (from the "static" folder of the Google Fonts zip) — preferred
+    { file: "NotoNastaliqUrdu-Regular.woff2", family: "Noto Nastaliq Urdu", mime: "font/woff2", format: "woff2", weight: "normal" },
+    { file: "NotoNastaliqUrdu-Regular.woff", family: "Noto Nastaliq Urdu", mime: "font/woff", format: "woff", weight: "normal" },
+    { file: "NotoNastaliqUrdu-Regular.ttf", family: "Noto Nastaliq Urdu", mime: "font/ttf", format: "truetype", weight: "normal" },
+    // Variable font (the single file Google Fonts puts at the top of the zip)
+    { file: "NotoNastaliqUrdu-VariableFont_wght.ttf", family: "Noto Nastaliq Urdu", mime: "font/ttf", format: "truetype", weight: "400 700" },
+    { file: "NotoNastaliqUrdu[wght].ttf", family: "Noto Nastaliq Urdu", mime: "font/ttf", format: "truetype", weight: "400 700" },
+    // Optional local alternative
+    { file: "JameelNooriNastaleeq.ttf", family: "Jameel Noori Nastaleeq", mime: "font/ttf", format: "truetype", weight: "normal" },
+  ];
+
+  for (const c of candidates) {
+    const p = resolveAssetPath(path.join("fonts", c.file)) ?? resolveAssetPath(c.file);
+    if (!p) continue;
+    try {
+      const buf = fs.readFileSync(p);
+      // Registered under the same family names already listed first in the
+      // .urdu-notice font stack, so no stack changes are needed.
+      return `@font-face{font-family:"${c.family}";src:url("data:${c.mime};base64,${buf.toString("base64")}") format("${c.format}");font-weight:${c.weight};font-style:normal;}`;
+    } catch {
+      // fall through to the next candidate
+    }
+  }
+
+  console.warn(
+    "Urdu webfont not found (looked in src/public/fonts and public/fonts for " +
+      "NotoNastaliqUrdu-Regular.ttf/.woff2 or NotoNastaliqUrdu-VariableFont_wght.ttf). " +
+      "Falling back to system fonts — Urdu text WILL render as boxes on servers without a Nastaliq font installed.",
+  );
+  return "";
+}
+export const urduFontFaceCss = loadUrduFontFaceCss();
+
+// ============================================================================
 // HELPERS
 // ============================================================================
 function esc(s: unknown): string {
@@ -55,12 +98,13 @@ function esc(s: unknown): string {
   );
 }
 
-// Urdu legal/terms notice printed at the bottom of the AWB, Receipt, and
-// Shipping Bill. Kept as a single constant so all three templates render
-// identical wording. NOTE: this string is Urdu (RTL) text, not markup — it
-// is inserted via ${URDU_NOTICE} inside elements that already carry
-// dir="rtl" styling (.urdu-notice / .urdu-notice-sm), so it is intentionally
-// not passed through esc() beyond what's already safe plain text.
+// Urdu legal/terms notice printed at the bottom of the AWB and Receipt only.
+// (Intentionally NOT shown on the small shipping label.) Kept as a single
+// constant so both templates render identical wording. NOTE: this string is
+// Urdu (RTL) text, not markup — it is inserted via ${URDU_NOTICE} inside
+// elements that already carry dir="rtl" styling (.urdu-notice), so it is
+// intentionally not passed through esc() beyond what's already safe plain
+// text.
 const URDU_NOTICE =
   "ٹوٹنے والی اشیاء کی کوئی گارنٹی نہیں ۔۔۔ پارسل گم ہونے کی صورت میں زیادہ سے زیادہ 100 ڈالر کلیم کمپنی ادا کرے گی نیز انشورنس کے بغیر کاغذات کے گم ہونے کی صورت میں صرف بکنگ کی رقم کی واپسی ہوگی ۔ ۔ ۔ اگر اس ملک کی گورنمنٹ یا اس ملک کا کستم کسی قسم کا کوئی ٹیکس ڈیوٹی لگاتا ہے تو وہ کسٹمر ادا کرے گا۔ میں نے اوپر ذکر کردہ تمام شرائط و ضوابط کو پڑھ لیا ہے اور اس سے اتفاق کرتا ہوں۔";
 
@@ -110,11 +154,6 @@ function addressLines(c: DocContact): string {
 
 // ============================================================================
 // CORE CSS STYLE STACK
-// NOTE: `.page` here is the ONLY definition of that class in this file. It is
-// the A4 page used by the AWB and the Receipt. The Shipping Bill (courier
-// label) below intentionally does NOT use `.page` at all — it defines its
-// own `.label-page` class — so its small fixed-size layout can never
-// collide with or override the A4 sizing here.
 // ============================================================================
 export const SHARED_CSS = `
   * { box-sizing: border-box; }
@@ -146,7 +185,7 @@ export const SHARED_CSS = `
     direction: rtl;
     text-align: right;
     unicode-bidi: isolate;
-    font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", "Segoe UI", Arial, sans-serif;
+    font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", "Urdu Typesetting", "Segoe UI", Arial, sans-serif;
     font-size: 9px;
     line-height: 1.75;
     color: #222;
@@ -169,15 +208,15 @@ export function awbHtml(d: DocData, barcode: string): string {
       <td class="num">${r.quantity}</td>
       <td class="num">$ ${r.value.toFixed(2)}</td>
     </tr>`).join("");
-    const priceLine = d.price != null
-  ? `${Number(d.price).toFixed(2)} ${esc(d.priceCurrency ?? "")}`.trim()
-  : "—";
+  const priceLine = d.price != null
+    ? `${Number(d.price).toFixed(2)} ${esc(d.priceCurrency ?? "")}`.trim()
+    : "—";
   const totalValue = itemRows.reduce((s, r) => s + r.value, 0);
   const shipDate = fmtDate(d.createdAt);
   const cnic = d.sender.cnic || "—";
   const origin = d.sender.country || "Pakistan";
 
-  return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${urduFontFaceCss}${SHARED_CSS}
     .inv { border: 1.5px solid #000; }
     .inv .title { text-align:center; font-weight:800; letter-spacing:0.6px; font-size:13px; padding:7px 4px; border-bottom:1.5px solid #000; }
     .inv .r { display:flex; }
@@ -291,7 +330,7 @@ export function awbHtml(d: DocData, barcode: string): string {
 // TEMPLATE 2: SHIPPING RECEIPT — A4
 // ============================================================================
 export function receiptHtml(d: DocData, barcode: string): string {
-  
+
   const pkgRows = d.boxes.map((b, i) => {
     const contents = b.items.map((it) => esc(it.description)).filter(Boolean).join(", ") || (b.label ? esc(b.label) : "—");
     return `<tr>
@@ -308,7 +347,7 @@ export function receiptHtml(d: DocData, barcode: string): string {
     ? `${Number(d.price).toFixed(2)} ${esc(d.priceCurrency ?? "")}`.trim()
     : "—";
 
-  return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${urduFontFaceCss}${SHARED_CSS}
     .kv { display:grid; grid-template-columns: max-content 1fr; gap: 2px 12px; }
     .kv .k { color:#555; }
   </style></head><body>
@@ -375,7 +414,8 @@ export function receiptHtml(d: DocData, barcode: string): string {
 // TEMPLATE 3: SHIPPING BILL (courier label / customs-style bill)
 // Small fixed-size label. Uses its own `.label-page` class instead of
 // `.page`, so it can never collide with / override the A4 `.page` used by
-// the AWB and Receipt above. A visible border now wraps the whole label.
+// the AWB and Receipt above. A visible border wraps the whole label.
+// The Urdu notice is intentionally NOT rendered on this label.
 // ============================================================================
 export function shippingBillHtml(d: DocData, barcode: string): string {
   const isDox = d.contentsNature === "documents";
@@ -416,38 +456,27 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
       margin: 0 auto;
     }
     .bill { border: 1.5px solid #000; height: 100%; display: flex; flex-direction: column; }
-.bill .top { display:flex; justify-content:space-between; align-items:center; padding:9px 8px; border-bottom:1.5px solid #000; }
-.bill .route { font-size:9px; font-weight:600; }
-.bill .route-date { font-size:9px; margin-top:2px; }
-.bill .doxtag { background:#333; color:#fff; font-weight:800; letter-spacing:0.5px; padding:4px 10px; font-size:10px; }
-.bill .courier { font-size:15px; font-weight:800; letter-spacing:0.3px; }
-.bill .row { display:flex; border-bottom:1.5px solid #000; }
-.bill .row > .cell { padding:9px 8px; }
-.bill .row > .cell.br { border-right:1.5px solid #000; }
-.bill .lbl3 { font-weight:700; font-size:9px; }
-.bill .val3 { font-size:10.5px; font-weight:700; margin-top:2px; }
-.bill .contact { font-weight:700; margin-top:3px; font-size:9px; }
-.bill .banner { background:#c9c9c9; text-align:center; font-weight:800; font-size:14px; padding:6px; letter-spacing:0.5px; }
-.bill .meta { display:flex; border-bottom:1.5px solid #000; }
-.bill .meta > .cell { flex:1; padding:8px; border-right:1px solid #000; }
-.bill .meta > .cell:last-child { border-right:0; }
-.bill .meta .k { font-weight:700; font-size:9px; }
-.bill .meta .v { font-size:10.5px; margin-top:2px; }
-.bill .awb { padding:8px; font-weight:800; font-size:11px; border-bottom:1px solid #000; }
-.bill .barcodewrap { position:relative; padding:10px 8px; display:flex; align-items:center; justify-content:space-between; }
-.bill .barcodewrap .barcode-img { height:86px; width:auto; max-width:100%; }
-.bill .barcodewrap .logo-img { position:absolute; right:8px; bottom:0px;top:10px; height:32px; width:auto; object-fit:contain; opacity:0.85; }
-.bill .urdu-notice-sm {
-  direction: rtl;
-  text-align: right;
-  unicode-bidi: isolate;
-  font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", Arial, sans-serif;
-  font-size: 6px;
-  line-height: 1.35;
-  color: #333;
-  padding: 3px 6px 4px;
-  border-top: 1px solid #000;
-}
+    .bill .top { display:flex; justify-content:space-between; align-items:center; padding:9px 8px; border-bottom:1.5px solid #000; }
+    .bill .route { font-size:9px; font-weight:600; }
+    .bill .route-date { font-size:9px; margin-top:2px; }
+    .bill .doxtag { background:#333; color:#fff; font-weight:800; letter-spacing:0.5px; padding:4px 10px; font-size:10px; }
+    .bill .courier { font-size:15px; font-weight:800; letter-spacing:0.3px; }
+    .bill .row { display:flex; border-bottom:1.5px solid #000; }
+    .bill .row > .cell { padding:9px 8px; }
+    .bill .row > .cell.br { border-right:1.5px solid #000; }
+    .bill .lbl3 { font-weight:700; font-size:9px; }
+    .bill .val3 { font-size:10.5px; font-weight:700; margin-top:2px; }
+    .bill .contact { font-weight:700; margin-top:3px; font-size:9px; }
+    .bill .banner { background:#c9c9c9; text-align:center; font-weight:800; font-size:14px; padding:6px; letter-spacing:0.5px; }
+    .bill .meta { display:flex; border-bottom:1.5px solid #000; }
+    .bill .meta > .cell { flex:1; padding:8px; border-right:1px solid #000; }
+    .bill .meta > .cell:last-child { border-right:0; }
+    .bill .meta .k { font-weight:700; font-size:9px; }
+    .bill .meta .v { font-size:10.5px; margin-top:2px; }
+    .bill .awb { padding:8px; font-weight:800; font-size:11px; border-bottom:1px solid #000; }
+    .bill .barcodewrap { position:relative; padding:10px 8px; display:flex; align-items:center; justify-content:space-between; flex:1 1 auto; }
+    .bill .barcodewrap .barcode-img { height:86px; width:auto; max-width:100%; }
+    .bill .barcodewrap .logo-img { position:absolute; right:8px; bottom:0px; top:10px; height:32px; width:auto; object-fit:contain; opacity:0.85; }
   </style></head><body>
   <div class="label-page">
     <div class="bill">
@@ -515,7 +544,6 @@ export function shippingBillHtml(d: DocData, barcode: string): string {
         <img class="barcode-img" src="${barcode}" alt="barcode">
         ${logoDataUri ? `<img class="logo-img" src="${logoDataUri}" alt="Prep Max Logistics">` : ""}
       </div>
-      <div class="urdu-notice-sm">${URDU_NOTICE}</div>
     </div>
   </div>
   </body></html>`;
