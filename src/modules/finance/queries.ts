@@ -184,14 +184,20 @@ export interface VendorRow {
   openingBalance: number;
   isActive: boolean;
   isProtected: boolean;
+  branchPublicId: string | null;
+  branchName: string | null;
+  branchCity: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
 const VENDOR_FIELDS = `
   v.public_id, v.name, v.code, v.vendor_type, v.contact_name, v.phone, v.email,
-  v.address, v.opening_balance, v.is_active, v.is_protected, v.created_at, v.updated_at
+  v.address, v.opening_balance, v.is_active, v.is_protected, v.created_at, v.updated_at,
+  b.public_id AS branch_public_id, b.name AS branch_name, b.city AS branch_city
 `;
+
+const VENDOR_JOIN = `LEFT JOIN branches b ON b.id = v.branch_id`;
 
 function mapVendor(r: Record<string, unknown>): VendorRow {
   return {
@@ -206,6 +212,9 @@ function mapVendor(r: Record<string, unknown>): VendorRow {
     openingBalance: n(r.opening_balance),
     isActive: r.is_active as boolean,
     isProtected: r.is_protected as boolean,
+    branchPublicId: (r.branch_public_id as string | null) ?? null,
+    branchName: (r.branch_name as string | null) ?? null,
+    branchCity: (r.branch_city as string | null) ?? null,
     createdAt: r.created_at as string,
     updatedAt: r.updated_at as string,
   };
@@ -236,7 +245,7 @@ export async function listVendors(
     const limitIdx = params2.length - 1;
     const offsetIdx = params2.length;
     const { rows } = await sql.query(
-      `SELECT ${VENDOR_FIELDS} FROM vendors v ${where} ORDER BY v.name ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      `SELECT ${VENDOR_FIELDS} FROM vendors v ${VENDOR_JOIN} ${where} ORDER BY v.name ASC LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       params2,
     );
     const { rows: countRows } = await sql.query<{ count: string }>(
@@ -261,7 +270,7 @@ export async function createVendor(run: Run, branchId: string, userId: string, i
         input.address ?? null, input.openingBalance, input.isActive, userId,
       ],
     );
-    const { rows } = await sql.query(`SELECT ${VENDOR_FIELDS} FROM vendors v WHERE v.public_id = $1`, [pid]);
+    const { rows } = await sql.query(`SELECT ${VENDOR_FIELDS} FROM vendors v ${VENDOR_JOIN} WHERE v.public_id = $1`, [pid]);
     return mapVendor(rows[0]!);
   });
 }
@@ -302,7 +311,7 @@ export async function updateVendor(run: Run, publicIdArg: string, input: UpdateV
     params.push(publicIdArg);
     const { rowCount } = await sql.query(`UPDATE vendors SET ${sets.join(", ")} WHERE public_id = $${params.length}`, params);
     if (rowCount === 0) throw new FinanceError(404, "Vendor not found");
-    const { rows } = await sql.query(`SELECT ${VENDOR_FIELDS} FROM vendors v WHERE v.public_id = $1`, [publicIdArg]);
+    const { rows } = await sql.query(`SELECT ${VENDOR_FIELDS} FROM vendors v ${VENDOR_JOIN} WHERE v.public_id = $1`, [publicIdArg]);
     return mapVendor(rows[0]!);
   });
 }
