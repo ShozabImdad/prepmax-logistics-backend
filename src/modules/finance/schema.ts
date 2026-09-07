@@ -36,14 +36,18 @@ export type InvoiceStatus = z.infer<typeof invoiceStatusSchema>;
 export const invoiceItemSchema = z.object({
   description: z.string().min(1).max(500),
   quantity: z.number().positive().max(1000000, "Quantity is too large").default(1),
-  unitPrice: money((s) => s.nonnegative()).default(0),
+  // May be negative for explicit addition/deduction adjustment lines on an invoice.
+  unitPrice: money().default(0),
+  orderPublicId: z.string().optional(),
 });
 export type InvoiceItemInput = z.infer<typeof invoiceItemSchema>;
 
 export const createInvoiceSchema = z.object({
   branchPublicId: z.string().optional(),  // required for super_admin
   customerPublicId: z.string().min(1),
+  // Legacy single-order link; prefer orderPublicIds for consolidated billing.
   orderPublicId: z.string().optional(),
+  orderPublicIds: z.array(z.string().min(1)).max(500).optional(),
   isCreditNote: z.boolean().default(false),
   // Only meaningful when isCreditNote is true — the invoice this credit note
   // corrects. Optional even then: some credit notes are general goodwill
@@ -52,7 +56,7 @@ export const createInvoiceSchema = z.object({
   issueDate: z.string().optional(),                  // ISO date YYYY-MM-DD
   dueDate: z.string().optional(),
   currency: z.string().max(3).default("PKR"),
- items: z.array(invoiceItemSchema).min(1, "At least one line item is required"),
+  items: z.array(invoiceItemSchema).min(1, "At least one line item is required"),
   tax: money((s) => s.nonnegative()).default(0),
   notes: z.string().max(2000).optional(),
   status: invoiceStatusSchema.default("unpaid"),
@@ -62,12 +66,13 @@ export type CreateInvoiceInput = z.infer<typeof createInvoiceSchema>;
 export const updateInvoiceSchema = z.object({
   customerPublicId: z.string().optional(),
   orderPublicId: z.string().optional().nullable(),
+  orderPublicIds: z.array(z.string().min(1)).max(500).optional().nullable(),
   isCreditNote: z.boolean().optional(),
   referencedInvoicePublicId: z.string().optional().nullable(),
   issueDate: z.string().optional(),
   dueDate: z.string().optional().nullable(),
   currency: z.string().max(3).optional(),
-items: z.array(invoiceItemSchema).optional(),
+  items: z.array(invoiceItemSchema).optional(),
   tax: money((s) => s.nonnegative()).optional(),
   notes: z.string().max(2000).optional().nullable(),
   status: invoiceStatusSchema.optional(),

@@ -87,8 +87,15 @@ orderRouter.get(
     const search = typeof req.query.q === "string" ? req.query.q : undefined;
     const createdVia = typeof req.query.createdVia === "string" ? req.query.createdVia : undefined;
     const customerPublicId = typeof req.query.customerPublicId === "string" ? req.query.customerPublicId : undefined;
-    const carrier = typeof req.query.carrier === "string" ? req.query.carrier : undefined; // ← add
-    const orders = await listOrders(req.db!, { status, createdVia, search, customerPublicId, carrier }); // ← pass it
+    const carrier = typeof req.query.carrier === "string" ? req.query.carrier : undefined;
+    const fromDate = typeof req.query.fromDate === "string" ? req.query.fromDate : undefined;
+    const toDate = typeof req.query.toDate === "string" ? req.query.toDate : undefined;
+    const excludeCancelled = req.query.excludeCancelled === "1" || req.query.excludeCancelled === "true";
+    const limitRaw = typeof req.query.limit === "string" ? Number(req.query.limit) : undefined;
+    const limit = Number.isFinite(limitRaw) ? limitRaw : undefined;
+    const orders = await listOrders(req.db!, {
+      status, createdVia, search, customerPublicId, carrier, fromDate, toDate, excludeCancelled, limit,
+    });
     return res.json({ orders });
   }),
 );

@@ -82,19 +82,30 @@ function brandHeader(branchName: string | null, branchCity: string | null): stri
 // InvoiceRow.items actually selects orderPublicId — if the field doesn't
 // exist on the row type/query yet, this renders nothing until it's added.
 export function invoiceHtml(inv: InvoiceRow): string {
-  const items = inv.items ?? [];
+  const rawItems = inv.items ?? [];
+  // Orders first, then any adjustment / non-order lines at the end.
+  const items = [...rawItems].sort((a, b) => {
+    const aAdj = !a.orderPublicId ? 1 : 0;
+    const bAdj = !b.orderPublicId ? 1 : 0;
+    return aAdj - bAdj;
+  });
   const rows = (items.length ? items : [{ description: "—", quantity: 0, unitPrice: 0, lineTotal: 0, orderPublicId: null }])
-    .map((it: any) => `<tr>
-        <td>${esc(it.description)}${it.orderPublicId ? `<span class="ref">Order ${esc(it.orderPublicId)}</span>` : ""}</td>
-        <td class="num">${it.quantity}</td>
-        <td class="num">${money(it.unitPrice, inv.currency)}</td>
+    .map((it) => {
+      const isAdjustment = !it.orderPublicId && /adjustment|addition|deduction|additional charge/i.test(it.description);
+      return `<tr class="${isAdjustment ? "adj" : ""}">
+        <td>${esc(it.description)}</td>
         <td class="num">${money(it.lineTotal, inv.currency)}</td>
-      </tr>`).join("");
+      </tr>`;
+    }).join("");
 
   const balanceDue = Math.max(inv.total - inv.amountPaid - inv.creditedAmount, 0);
   const custContact = [inv.customerEmail, inv.customerPhone].filter(Boolean).map(esc).join(" · ");
 
-  return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}${FINANCE_CSS}</style></head><body>
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${SHARED_CSS}${FINANCE_CSS}
+    table.items.inv th:first-child, table.items.inv td:first-child { width: 78%; }
+    table.items.inv th.num, table.items.inv td.num { width: 22%; }
+    table.items.inv tr.adj td { border-top: 1.5px solid #111; font-style: italic; }
+  </style></head><body>
   <div class="page">
     <div class="top">
       ${brandHeader(inv.branchName, inv.branchCity)}
@@ -115,18 +126,22 @@ export function invoiceHtml(inv: InvoiceRow): string {
         <div class="lbl">Details</div>
         <div>Issue Date: <strong>${fmtDate(inv.issueDate)}</strong></div>
         <div>Due Date: <strong>${fmtDate(inv.dueDate)}</strong></div>
-        ${inv.orderPublicId ? `<div>Order: <strong>${esc(inv.orderPublicId)}</strong></div>` : ""}
+        ${inv.orderPublicIds?.length
+          ? `<div>Orders: <strong>${inv.orderPublicIds.length}</strong></div>`
+          : inv.orderPublicId
+            ? `<div>Order: <strong>${esc(inv.orderPublicId)}</strong></div>`
+            : ""}
       </div>
     </div>
 
-    <table class="items">
-      <thead><tr><th>Description</th><th class="num">Qty</th><th class="num">Unit Price</th><th class="num">Amount</th></tr></thead>
+    <table class="items inv">
+      <thead><tr><th>Description</th><th class="num">Amount</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
 
     <table class="totals">
       <tr><td>Subtotal</td><td class="num">${money(inv.subtotal, inv.currency)}</td></tr>
-      <tr><td>Tax</td><td class="num">${money(inv.tax, inv.currency)}</td></tr>
+      ${inv.tax ? `<tr><td>Tax</td><td class="num">${money(inv.tax, inv.currency)}</td></tr>` : ""}
       <tr class="grand"><td>Total</td><td class="num">${money(inv.total, inv.currency)}</td></tr>
       <tr><td>Amount Paid</td><td class="num">${money(inv.amountPaid, inv.currency)}</td></tr>
       ${inv.creditedAmount ? `<tr><td>Credited</td><td class="num">${money(inv.creditedAmount, inv.currency)}</td></tr>` : ""}

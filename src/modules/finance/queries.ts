@@ -375,6 +375,7 @@ export interface InvoiceItemRow {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  orderPublicId: string | null;
 }
 
 export interface InvoiceRow {
@@ -385,6 +386,7 @@ export interface InvoiceRow {
   customerEmail: string | null;
   customerPhone: string | null;
   orderPublicId: string | null;
+  orderPublicIds: string[];
   branchPublicId: string;
   branchName: string | null;
   branchCity: string | null;
@@ -429,6 +431,7 @@ function mapInvoice(r: Record<string, unknown>): InvoiceRow {
     customerEmail: (r.customer_email as string | null) ?? null,
     customerPhone: (r.customer_phone as string | null) ?? null,
     orderPublicId: (r.order_public_id as string | null) ?? null,
+    orderPublicIds: [],
     branchPublicId: r.branch_public_id as string,
     branchName: (r.branch_name as string | null) ?? null,
     branchCity: (r.branch_city as string | null) ?? null,
@@ -517,11 +520,27 @@ async function fetchInvoiceBySql(sql: Sql, publicIdArg: string): Promise<Invoice
   );
   if (!rows[0]) throw new FinanceError(404, "Invoice not found");
   const inv = mapInvoice(rows[0]!);
+
+  const { rows: linkedOrders } = await sql.query<{ public_id: string }>(
+    `SELECT o.public_id
+       FROM invoice_orders io
+       JOIN orders o ON o.id = io.order_id
+       JOIN invoices i ON i.id = io.invoice_id
+      WHERE i.public_id = $1
+      ORDER BY o.created_at ASC`,
+    [publicIdArg],
+  );
+  inv.orderPublicIds = linkedOrders.map((r) => r.public_id);
+  if (!inv.orderPublicId && inv.orderPublicIds.length === 1) {
+    inv.orderPublicId = inv.orderPublicIds[0]!;
+  }
+
   const { rows: itemRows } = await sql.query(
-    `SELECT description, quantity, unit_price, line_total
-       FROM invoice_items
-      WHERE invoice_id = (SELECT id FROM invoices WHERE public_id = $1)
-      ORDER BY id ASC`,
+    `SELECT ii.description, ii.quantity, ii.unit_price, ii.line_total, o.public_id AS order_public_id
+       FROM invoice_items ii
+       LEFT JOIN orders o ON o.id = ii.order_id
+      WHERE ii.invoice_id = (SELECT id FROM invoices WHERE public_id = $1)
+      ORDER BY CASE WHEN ii.order_id IS NULL THEN 1 ELSE 0 END ASC, ii.id ASC`,
     [publicIdArg],
   );
   inv.items = itemRows.map((r) => ({
@@ -530,8 +549,72 @@ async function fetchInvoiceBySql(sql: Sql, publicIdArg: string): Promise<Invoice
     quantity: n(r.quantity),
     unitPrice: n(r.unit_price),
     lineTotal: n(r.line_total),
+    orderPublicId: (r.order_public_id as string | null) ?? null,
   }));
   return inv;
+}
+
+/** Resolve order public ids → internal ids, all belonging to the given customer. */
+async function resolveCustomerOrders(
+  sql: Sql,
+  customerId: string,
+  orderPublicIds: string[],
+): Promise<{ id: string; publicId: string; trackingCode: string; price: number }[]> {
+  const unique = [...new Set(orderPublicIds.filter(Boolean))];
+  if (!unique.length) return [];
+  const { rows } = await sql.query<{ id: string; public_id: string; tracking_code: string; price: string | null; customer_id: string }>(
+    `SELECT id, public_id, tracking_code, price, customer_id
+       FROM orders
+      WHERE public_id = ANY($1::text[])`,
+    [unique],
+  );
+  if (rows.length !== unique.length) {
+    const found = new Set(rows.map((r) => r.public_id));
+    const missing = unique.find((id) => !found.has(id));
+    throw new FinanceError(404, `Order not found: ${missing}`);
+  }
+  for (const r of rows) {
+    if (r.customer_id !== customerId) {
+      throw new FinanceError(400, `Order ${r.tracking_code} does not belong to this customer`);
+    }
+  }
+  // Preserve caller order
+  const byPublic = new Map(rows.map((r) => [r.public_id, r]));
+  return unique.map((pid) => {
+    const r = byPublic.get(pid)!;
+    return {
+      id: r.id,
+      publicId: r.public_id,
+      trackingCode: r.tracking_code,
+      price: r.price != null ? Number(r.price) : 0,
+    };
+  });
+}
+
+async function replaceInvoiceOrders(
+  sql: Sql,
+  invoiceId: string,
+  branchId: string,
+  orderIds: string[],
+): Promise<void> {
+  await sql.query("DELETE FROM invoice_orders WHERE invoice_id = $1", [invoiceId]);
+  for (const orderId of orderIds) {
+    await sql.query(
+      `INSERT INTO invoice_orders (invoice_id, order_id, branch_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [invoiceId, orderId, branchId],
+    );
+  }
+}
+
+function collectOrderPublicIds(input: {
+  orderPublicId?: string | null;
+  orderPublicIds?: string[] | null;
+}): string[] {
+  const ids = [...(input.orderPublicIds ?? [])];
+  if (input.orderPublicId) ids.push(input.orderPublicId);
+  return [...new Set(ids.filter(Boolean))];
 }
 
 export async function getInvoice(run: Run, publicIdArg: string): Promise<InvoiceRow> {
@@ -607,17 +690,16 @@ export async function createInvoice(
       [input.customerPublicId],
     );
     if (!custRows[0]) throw new FinanceError(404, "Customer not found");
+    const customerId = custRows[0]!.id;
 
-    // Resolve optional order
-    let orderId: string | null = null;
-    if (input.orderPublicId) {
-      const { rows: orderRows } = await sql.query<{ id: string }>(
-        "SELECT id FROM orders WHERE public_id = $1",
-        [input.orderPublicId],
-      );
-      if (!orderRows[0]) throw new FinanceError(404, "Order not found");
-      orderId = orderRows[0]!.id;
-    }
+    const allOrderPublicIds = [
+      ...collectOrderPublicIds(input),
+      ...input.items.map((it) => it.orderPublicId).filter((id): id is string => !!id),
+    ];
+    const linkedOrders = await resolveCustomerOrders(sql, customerId, allOrderPublicIds);
+    const orderIdByPublic = new Map(linkedOrders.map((o) => [o.publicId, o.id]));
+    // Header FK kept for single-order invoices / backward-compatible list display.
+    const headerOrderId = linkedOrders.length === 1 ? linkedOrders[0]!.id : (linkedOrders[0]?.id ?? null);
 
     // Resolve optional credit-note-to-invoice link. Only meaningful for
     // credit notes, but we don't hard-require it (goodwill adjustments may
@@ -633,15 +715,11 @@ export async function createInvoice(
         [input.referencedInvoicePublicId],
       );
       if (!refRows[0]) throw new FinanceError(404, "Referenced invoice not found");
-      if (refRows[0].customer_id !== custRows[0]!.id) {
+      if (refRows[0].customer_id !== customerId) {
         throw new FinanceError(400, "Referenced invoice belongs to a different customer");
       }
       if (input.isCreditNote) {
         const creditAmount = input.items.reduce((s, it) => s + it.quantity * it.unitPrice, 0) + input.tax;
-        // Remaining = total, minus what's already been paid, minus what's
-        // already been credited by earlier credit notes against this same
-        // invoice — otherwise a paid invoice still "shows" its original total
-        // as creditable, letting a new credit note double-dip.
         const remaining = Number(refRows[0].total) - Number(refRows[0].amount_paid) - Number(refRows[0].already_credited);
         if (creditAmount > remaining) {
           throw new FinanceError(400, `Credit note amount exceeds the referenced invoice's remaining balance of ${remaining.toFixed(2)}`);
@@ -664,26 +742,27 @@ export async function createInvoice(
        VALUES ($1,$2,$3,$4,$5,$6,$7,COALESCE($8,CURRENT_DATE),$9,$10,$11,$12,$13,0,$14,$15,$16)
        RETURNING id`,
       [
-        pid, branchId, invoiceNo, custRows[0]!.id, orderId, input.isCreditNote, referencedInvoiceId,
+        pid, branchId, invoiceNo, customerId, headerOrderId, input.isCreditNote, referencedInvoiceId,
         input.issueDate ?? null, input.dueDate ?? null, input.currency,
         subtotal, tax, total, status, input.notes ?? null, userId,
       ],
     );
     const invoiceId = invRows[0]!.id;
 
+    if (linkedOrders.length) {
+      await replaceInvoiceOrders(sql, invoiceId, branchId, linkedOrders.map((o) => o.id));
+    }
+
     for (const it of input.items) {
       const lineTotal = it.quantity * it.unitPrice * (input.isCreditNote ? -1 : 1);
+      const itemOrderId = it.orderPublicId ? (orderIdByPublic.get(it.orderPublicId) ?? null) : null;
       await sql.query(
-        `INSERT INTO invoice_items (invoice_id, branch_id, description, quantity, unit_price, line_total)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [invoiceId, branchId, it.description, it.quantity, it.unitPrice, lineTotal],
+        `INSERT INTO invoice_items (invoice_id, branch_id, order_id, description, quantity, unit_price, line_total)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [invoiceId, branchId, itemOrderId, it.description, it.quantity, it.unitPrice, lineTotal],
       );
     }
 
-    // A newly-saved credit note settles part (or all) of the invoice it
-    // references — re-derive that invoice's amount_paid/status so it flips
-    // to 'paid' once payments + credits cover the total, instead of sitting
-    // stuck on 'partial' forever.
     if (input.isCreditNote && referencedInvoiceId) {
       await recomputeInvoiceStatus(sql, referencedInvoiceId);
     }
@@ -715,13 +794,19 @@ const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_c
       customerId = rows[0]!.id;
     }
     let orderId: string | null | undefined;
-    if (input.orderPublicId !== undefined) {
-      if (input.orderPublicId === null) {
+    let linkedOrderIds: string[] | undefined;
+    if (input.orderPublicIds !== undefined || input.orderPublicId !== undefined) {
+      const ids = collectOrderPublicIds({
+        orderPublicId: input.orderPublicId === null ? undefined : input.orderPublicId,
+        orderPublicIds: input.orderPublicIds === null ? [] : input.orderPublicIds,
+      });
+      if (input.orderPublicIds === null && input.orderPublicId === null) {
+        linkedOrderIds = [];
         orderId = null;
-      } else {
-        const { rows } = await sql.query<{ id: string }>("SELECT id FROM orders WHERE public_id = $1", [input.orderPublicId]);
-        if (!rows[0]) throw new FinanceError(404, "Order not found");
-        orderId = rows[0]!.id;
+      } else if (ids.length || input.orderPublicIds !== undefined || input.orderPublicId !== undefined) {
+        const resolved = await resolveCustomerOrders(sql, customerId ?? inv.customer_id, ids);
+        linkedOrderIds = resolved.map((o) => o.id);
+        orderId = resolved.length === 1 ? resolved[0]!.id : (resolved[0]?.id ?? null);
       }
     }
 
@@ -764,14 +849,28 @@ const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_c
     if (input.items || input.tax !== undefined || input.isCreditNote !== undefined) {
       const itemRows = input.items
         ? await (async () => {
+            const itemOrderPublicIds = input.items!
+              .map((it) => it.orderPublicId)
+              .filter((id): id is string => !!id);
+            const resolvedItems = itemOrderPublicIds.length
+              ? await resolveCustomerOrders(sql, customerId ?? inv.customer_id, itemOrderPublicIds)
+              : [];
+            const orderIdByPublic = new Map(resolvedItems.map((o) => [o.publicId, o.id]));
+            if (linkedOrderIds === undefined && resolvedItems.length) {
+              linkedOrderIds = resolvedItems.map((o) => o.id);
+              orderId = resolvedItems.length === 1 ? resolvedItems[0]!.id : resolvedItems[0]!.id;
+              push("order_id", orderId);
+            }
+
             // Replace items atomically
             await sql.query("DELETE FROM invoice_items WHERE invoice_id = $1", [inv.id]);
             for (const it of input.items!) {
               const lineTotal = it.quantity * it.unitPrice * (isCreditNote ? -1 : 1);
+              const itemOrderId = it.orderPublicId ? (orderIdByPublic.get(it.orderPublicId) ?? null) : null;
               await sql.query(
-                `INSERT INTO invoice_items (invoice_id, branch_id, description, quantity, unit_price, line_total)
-                 VALUES ($1,$2,$3,$4,$5,$6)`,
-                [inv.id, inv.branch_id, it.description, it.quantity, it.unitPrice, lineTotal],
+                `INSERT INTO invoice_items (invoice_id, branch_id, order_id, description, quantity, unit_price, line_total)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+                [inv.id, inv.branch_id, itemOrderId, it.description, it.quantity, it.unitPrice, lineTotal],
               );
             }
             return input.items!;
@@ -789,6 +888,10 @@ const { rows: existing } = await sql.query<{ id: string; branch_id: string; is_c
       push("tax", taxAdj);
       push("total", total);
       finalTotal = total;
+    }
+
+    if (linkedOrderIds !== undefined) {
+      await replaceInvoiceOrders(sql, inv.id, inv.branch_id, linkedOrderIds);
     }
 
     // Cap check: runs whenever this is (or is becoming) a credit note tied to

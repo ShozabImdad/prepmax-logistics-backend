@@ -369,6 +369,11 @@ export interface OrderListRow {
   customerId: string | null;    // customer's public_id, when the order belongs to a customer
   customerName: string | null;  // customer's full name, when the order belongs to a customer
   createdAt: string;
+  price: number | null;
+  priceCurrency: string | null;
+  paymentStatus: string | null;
+  /** Non-void debit invoices that already include this order (may be re-invoiced). */
+  invoicedInvoices: { publicId: string; invoiceNo: string }[];
 }
 
 /**
@@ -378,7 +383,19 @@ export interface OrderListRow {
  */
 export async function listOrders(
   run: Run,
-  opts: { customerId?: string; customerPublicId?: string; status?: string; createdVia?: string; search?: string; carrier?: string; limit?: number; offset?: number },
+  opts: {
+    customerId?: string;
+    customerPublicId?: string;
+    status?: string;
+    createdVia?: string;
+    search?: string;
+    carrier?: string;
+    fromDate?: string;
+    toDate?: string;
+    excludeCancelled?: boolean;
+    limit?: number;
+    offset?: number;
+  },
 ): Promise<OrderListRow[]> {
   return run(async (sql) => {
     const conds: string[] = [];
@@ -401,9 +418,20 @@ export async function listOrders(
       params.push(opts.status);
       conds.push(`order_status = $${params.length}`);
     }
+    if (opts.excludeCancelled) {
+      conds.push(`order_status <> 'cancelled'`);
+    }
     if (opts.createdVia) {
       params.push(opts.createdVia);
       conds.push(`created_via = $${params.length}`);
+    }
+    if (opts.fromDate) {
+      params.push(opts.fromDate);
+      conds.push(`orders.created_at::date >= $${params.length}::date`);
+    }
+    if (opts.toDate) {
+      params.push(opts.toDate);
+      conds.push(`orders.created_at::date <= $${params.length}::date`);
     }
     const search = opts.search?.trim();
     if (search) {
@@ -435,7 +463,7 @@ export async function listOrders(
       )`);
     }
     const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-    params.push(Math.min(opts.limit ?? 50, 200));
+    params.push(Math.min(opts.limit ?? 50, 500));
     const limitIdx = params.length;
     params.push(opts.offset ?? 0);
     const offsetIdx = params.length;
@@ -443,7 +471,30 @@ export async function listOrders(
     const { rows } = await sql.query(
       `SELECT orders.public_id, orders.tracking_code, orders.order_status, orders.current_status,
               orders.receiver_city, orders.receiver_country, orders.created_via, orders.created_at,
-              customers.public_id AS customer_public_id, customers.full_name AS customer_name
+              orders.price, orders.price_currency, orders.payment_status,
+              customers.public_id AS customer_public_id, customers.full_name AS customer_name,
+              (
+                SELECT COALESCE(
+                  json_agg(
+                    json_build_object('publicId', x.public_id, 'invoiceNo', x.invoice_no)
+                    ORDER BY x.issue_date DESC, x.created_at DESC
+                  ),
+                  '[]'::json
+                )
+                  FROM (
+                    SELECT DISTINCT i.public_id, i.invoice_no, i.issue_date, i.created_at
+                      FROM invoices i
+                     WHERE i.status <> 'void'
+                       AND i.is_credit_note = false
+                       AND (
+                         i.order_id = orders.id
+                         OR EXISTS (
+                           SELECT 1 FROM invoice_orders io
+                            WHERE io.invoice_id = i.id AND io.order_id = orders.id
+                         )
+                       )
+                  ) x
+              ) AS invoiced_invoices
          FROM orders
          LEFT JOIN customers ON customers.id = orders.customer_id
          ${where}
@@ -451,18 +502,28 @@ export async function listOrders(
          LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       params,
     );
-    return rows.map((r) => ({
-      publicId: r.public_id,
-      trackingCode: r.tracking_code,
-      orderStatus: r.order_status,
-      currentStatus: r.current_status,
-      receiverCity: r.receiver_city,
-      receiverCountry: r.receiver_country,
-      createdVia: r.created_via,
-      customerId: r.customer_public_id ?? null,
-      customerName: r.customer_name ?? null,
-      createdAt: r.created_at,
-    }));
+    return rows.map((r) => {
+      const invoicedRaw = r.invoiced_invoices;
+      const invoicedInvoices = Array.isArray(invoicedRaw)
+        ? (invoicedRaw as { publicId: string; invoiceNo: string }[])
+        : [];
+      return {
+        publicId: r.public_id as string,
+        trackingCode: r.tracking_code as string,
+        orderStatus: r.order_status as string,
+        currentStatus: (r.current_status as string | null) ?? null,
+        receiverCity: (r.receiver_city as string | null) ?? null,
+        receiverCountry: (r.receiver_country as string | null) ?? null,
+        createdVia: r.created_via as string,
+        customerId: (r.customer_public_id as string | null) ?? null,
+        customerName: (r.customer_name as string | null) ?? null,
+        createdAt: r.created_at as string,
+        price: r.price != null ? Number(r.price) : null,
+        priceCurrency: (r.price_currency as string | null) ?? null,
+        paymentStatus: (r.payment_status as string | null) ?? null,
+        invoicedInvoices,
+      };
+    });
   });
 }
 
