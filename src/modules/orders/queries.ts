@@ -125,6 +125,23 @@ export async function editOrder(
     const vals: unknown[] = [];
     const push = (col: string, v: unknown) => { vals.push(v); set.push(`${col} = $${vals.length}`); };
 
+    // Staff-only: attach / clear the customer account on this order.
+    // Must belong to the same branch as the order. Customers editing their
+    // own booking must not be able to reassign ownership.
+    if (input.customerPublicId !== undefined && !opts.customerId) {
+      const raw = input.customerPublicId;
+      if (raw === null || raw === "") {
+        push("customer_id", null);
+      } else {
+        const { rows: custRows } = await sql.query<{ id: string }>(
+          "SELECT id FROM customers WHERE public_id = $1 AND branch_id = $2",
+          [raw, order.branch_id],
+        );
+        if (!custRows[0]) throw new OrderError(404, "Customer not found in this order's branch");
+        push("customer_id", custRows[0].id);
+      }
+    }
+
     const s = input.sender;
     if (s) {
       if (s.name !== undefined) push("sender_name", s.name || null);
@@ -559,9 +576,11 @@ export async function getOrderDetail(
       conds.push(`orders.customer_id = $${params.length}`);
     }
     const { rows } = await sql.query(
-      `SELECT orders.*, customers.public_id AS customer_public_id, customers.full_name AS customer_name
+      `SELECT orders.*, customers.public_id AS customer_public_id, customers.full_name AS customer_name,
+              branches.public_id AS branch_public_id
          FROM orders
          LEFT JOIN customers ON customers.id = orders.customer_id
+         JOIN branches ON branches.id = orders.branch_id
         WHERE ${conds.join(" AND ")}`,
       params,
     );
@@ -679,6 +698,7 @@ export async function getOrderDetail(
       base.createdVia = order.created_via;
       base.customerId = order.customer_public_id ?? null;
       base.customerName = order.customer_name ?? null;
+      base.branchPublicId = order.branch_public_id ?? null;
       base.price = order.price != null ? Number(order.price) : null;
       base.priceCurrency = order.price_currency;
       base.paymentStatus = order.payment_status;

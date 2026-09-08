@@ -66,7 +66,7 @@ const orderCore = {
 };
 
 export const createOrderSchema = z.object({
-  customerPublicId: z.string().optional(),
+  customerPublicId: z.string().nullish(),
   branchPublicId: z.string().optional(),
   ...orderCore,
   boxes: z.array(boxSchema).min(1, "at least one box is required"),
@@ -75,6 +75,9 @@ export const createOrderSchema = z.object({
 
 // Edit: everything optional; boxes optional (replace-all when provided).
 export const editOrderSchema = z.object({
+  // Staff can attach (or clear) an existing customer account on an order.
+  // Empty string / null clears the link. Omitted = leave unchanged.
+  customerPublicId: z.string().nullish(),
   sender: z.object(contact).optional(),
   receiver: z.object(contact).optional(),
   originCountry: z.string().optional(),
