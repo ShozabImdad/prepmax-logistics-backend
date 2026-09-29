@@ -25,13 +25,19 @@ import {
   editLeg,
   deleteLeg,
   listOrders,
-  listCarriers,        
+  listCarriers,
+  listSyncableOrders,
   getOrderDetail,
   resolveOrderId,
   editOrder,
 } from "./queries.js";
 import { syncOrder } from "../../tracking/sync.js";
 import { emitEvent } from "../notifications/events.js";
+import {
+  findActiveSyncAllJobForUser,
+  getSyncAllJob,
+  startSyncAllJob,
+} from "./sync-all-jobs.js";
 
 function handleOrderError(err: unknown, res: Response): void {
   if (err instanceof OrderError) {
@@ -255,6 +261,54 @@ orderRouter.patch(
     } catch (err) {
       return handleOrderError(err, res);
     }
+  }),
+);
+
+// ── STAFF: refresh tracking for all active (trackable) orders ───────────────
+// Async job: POST returns 202 + jobId immediately; poll GET /sync-all/:jobId.
+// Reuses syncOrder without changing src/tracking.
+orderRouter.post(
+  "/sync-all",
+  requireStaff,
+  requirePermission("tracking.view"),
+  asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+
+    const existing = findActiveSyncAllJobForUser(staff.userId);
+    if (existing) {
+      return res.status(409).json({
+        error: "A sync-all job is already running",
+        details: { jobId: existing.id, job: existing },
+      });
+    }
+
+    // Snapshot under this staff member's RLS — worker uses syncOrder's own DB txs.
+    const orders = await listSyncableOrders(req.db!);
+    const job = startSyncAllJob(staff.userId, orders);
+    return res.status(202).json({
+      jobId: job.id,
+      total: job.total,
+      status: job.status,
+      job,
+    });
+  }),
+);
+
+orderRouter.get(
+  "/sync-all/:jobId",
+  requireStaff,
+  requirePermission("tracking.view"),
+  asyncHandler(async (req, res) => {
+    const staff = req.auth!;
+    if (!isStaff(staff)) return res.status(403).json({ error: "Staff only" });
+    const job = getSyncAllJob(
+      param(req.params.jobId),
+      staff.userId,
+      staff.role === "super_admin",
+    );
+    if (!job) return res.status(404).json({ error: "Sync job not found" });
+    return res.json({ job });
   }),
 );
 

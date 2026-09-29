@@ -726,3 +726,28 @@ export async function listCarriers(run: Run): Promise<string[]> {
     return rows.map((r) => r.carrier);
   });
 }
+
+/**
+ * Active orders that have at least one carrier leg — the set worth syncing.
+ * Branch-scoped via RLS on `orders` / `shipment_legs`.
+ */
+export async function listSyncableOrders(
+  run: Run,
+): Promise<{ id: string; publicId: string; trackingCode: string }[]> {
+  return run(async (sql) => {
+    const { rows } = await sql.query<{ id: string; public_id: string; tracking_code: string }>(
+      `SELECT o.id, o.public_id, o.tracking_code
+         FROM orders o
+        WHERE o.order_status = 'active'
+          AND EXISTS (
+            SELECT 1 FROM shipment_legs sl WHERE sl.order_id = o.id
+          )
+        ORDER BY o.last_synced_at NULLS FIRST, o.created_at ASC`,
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      publicId: r.public_id,
+      trackingCode: r.tracking_code,
+    }));
+  });
+}
