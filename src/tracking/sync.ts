@@ -237,6 +237,16 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
     let handoffCreated: string | null = null;
     let activeResult: NormalizedTracking | null = null;
     let activeLeg: Leg | null = null;
+    // The leg whose status the ORDER should display. Legs are iterated in
+    // sequence order (leg 1 -> leg 2 ...), and a shipment physically moves
+    // forward through them (e.g. APX first mile -> UPS/DHL last mile). So the
+    // order's real current status is the MOST ADVANCED leg that returned data
+    // — the highest-sequence leg with a successful result — NOT whichever leg
+    // happens to carry is_active=true. This fixes the long-standing bug where a
+    // manually-attached leg 2 (never activated) meant the order stayed frozen
+    // on leg 1's status even after the last-mile carrier marked it delivered.
+    let statusResult: NormalizedTracking | null = null;
+    let statusLeg: Leg | null = null;
 
     // Poll every leg — not just the active one.
     for (const leg of legs) {
@@ -293,18 +303,28 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         activeResult = result;
         activeLeg = leg;
       }
+
+      // Any leg that returned data is a candidate to drive the order status;
+      // because we iterate in ascending sequence, the LAST one to set this is
+      // the most advanced leg with data.
+      statusResult = result;
+      statusLeg = leg;
     }
 
-    // Cached order-level status still reflects the ACTIVE leg only — that's
-    // "where the shipment currently is," same semantics as before.
-    if (activeResult && activeLeg) {
+    // Cached order-level status reflects the most ADVANCED leg with data (the
+    // parcel's real current position — see statusLeg above), not merely the
+    // is_active leg. Falls back to the active leg if that's the only one, and
+    // to nothing if no leg returned data.
+    const driveResult = statusResult ?? activeResult;
+    const driveLeg = statusLeg ?? activeLeg;
+    if (driveResult && driveLeg) {
       const prev = await sql.query<{ current_status: string | null }>(
         "SELECT current_status FROM orders WHERE id = $1",
         [orderId],
       );
       const prevStatus = prev.rows[0]?.current_status ?? null;
 
-      const orderStatus = activeResult.status === "delivered" ? "delivered" : undefined;
+      const orderStatus = driveResult.status === "delivered" ? "delivered" : undefined;
       await sql.query(
         `UPDATE orders
             SET current_status = $2,
@@ -312,16 +332,16 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
                 last_synced_at = now()
                 ${orderStatus ? ", order_status = 'delivered'" : ""}
           WHERE id = $1`,
-        [orderId, activeResult.status, activeResult.statusText],
+        [orderId, driveResult.status, driveResult.statusText],
       );
 
-      if (activeResult.status !== prevStatus) {
-        if (activeResult.status === "delivered") {
-          emitEvent({ kind: "order_delivered", orderId, branchId: activeLeg.branchId });
-          } else if (activeResult.status === "out_for_delivery") {
-          emitEvent({ kind: "order_out_for_delivery", orderId, branchId: activeLeg.branchId, statusText: activeResult.statusText });
-        } else if (activeResult.status === "exception") {
-          emitEvent({ kind: "order_exception", orderId, branchId: activeLeg.branchId, statusText: activeResult.statusText });
+      if (driveResult.status !== prevStatus) {
+        if (driveResult.status === "delivered") {
+          emitEvent({ kind: "order_delivered", orderId, branchId: driveLeg.branchId });
+          } else if (driveResult.status === "out_for_delivery") {
+          emitEvent({ kind: "order_out_for_delivery", orderId, branchId: driveLeg.branchId, statusText: driveResult.statusText });
+        } else if (driveResult.status === "exception") {
+          emitEvent({ kind: "order_exception", orderId, branchId: driveLeg.branchId, statusText: driveResult.statusText });
         }
       }
     } else {
@@ -334,7 +354,9 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       orderId,
       carrier: activeCarrier,
       status: "synced",
-      normalizedStatus: activeResult?.status,
+      // Reflect the leg that actually drives the order status (most advanced
+      // leg with data), so the poller log / sync-all summary aren't misleading.
+      normalizedStatus: (statusResult ?? activeResult)?.status,
       newEvents: totalNewEvents,
       handoffCreated,
       legs: legResults,
