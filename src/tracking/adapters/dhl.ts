@@ -57,7 +57,11 @@ function mapStatus(statusCode: string, description: string): ShipmentStatus {
   if (code === "delivered" || desc.includes("delivered")) return "delivered";
   if (desc.includes("out with courier") || desc.includes("out for delivery")) return "out_for_delivery";
   if (code === "transit") return "in_transit";
-  if (code === "unknown" && (desc.includes("payment") || desc.includes("received"))) return "info_received";
+  // DHL uses "pre-transit" for a shipment whose label/information has been
+  // received but which hasn't physically entered the network yet.
+  if (code === "pre-transit" || (code === "unknown" && (desc.includes("payment") || desc.includes("received")))) {
+    return "info_received";
+  }
   if (code === "exception" || desc.includes("delay") || desc.includes("held")) return "exception";
   console.warn(`DHL: unmapped status code "${statusCode}" / "${description}"`);
   return "unknown";
