@@ -17,7 +17,7 @@ import { pool } from "../db/pool.js";
 import { resolveAdapter } from "./adapters/index.js";
 import { detectHandoff } from "./adapters/handoff.js";
 import { emitEvent } from "../modules/notifications/events.js";
-import type { NormalizedTracking, TrackingEvent } from "./adapters/types.js";
+import type { NormalizedTracking, ShipmentStatus, TrackingEvent } from "./adapters/types.js";
 
 // Terminal statuses we stop polling.
 export const TERMINAL_STATUSES = new Set(["delivered"]);
@@ -112,6 +112,22 @@ async function withOrderBranchTx<T>(branchId: string, fn: (sql: Sql) => Promise<
     client.release();
   }
 }
+
+// Relative progress rank of a normalized status. Used to pick which leg drives
+// the order-level status: a shipment moves forward through its legs, so the
+// order should show the FURTHEST-ALONG leg that returned data — but measured by
+// real progress, not merely by leg sequence. This prevents a last-mile leg that
+// has only just printed a label ("info_received") from downgrading an order whose
+// first-mile leg is already "in_transit" (e.g. cleared customs). "unknown" ranks
+// below everything so a leg with no clear status never wins over one that has one.
+const STATUS_RANK: Record<ShipmentStatus, number> = {
+  unknown: -1,
+  info_received: 0,
+  in_transit: 1,
+  out_for_delivery: 2,
+  exception: 3,
+  delivered: 4,
+};
 
 // Build a stable de-dupe key for an event within a leg.
 function eventKey(e: TrackingEvent): string {
@@ -304,11 +320,20 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         activeLeg = leg;
       }
 
-      // Any leg that returned data is a candidate to drive the order status;
-      // because we iterate in ascending sequence, the LAST one to set this is
-      // the most advanced leg with data.
-      statusResult = result;
-      statusLeg = leg;
+      // Any leg that returned data is a candidate to drive the order status.
+      // Pick the FURTHEST-ALONG leg by real progress rank, with later sequence
+      // breaking ties. This way a delivered last-mile leg wins over an in-transit
+      // first-mile leg, but a last-mile leg that has only printed a label does
+      // NOT downgrade an order whose first-mile leg is already further along.
+      if (
+        statusResult === null || statusLeg === null ||
+        STATUS_RANK[result.status] > STATUS_RANK[statusResult.status] ||
+        (STATUS_RANK[result.status] === STATUS_RANK[statusResult.status] &&
+          leg.sequence >= statusLeg.sequence)
+      ) {
+        statusResult = result;
+        statusLeg = leg;
+      }
     }
 
     // Cached order-level status reflects the most ADVANCED leg with data (the
