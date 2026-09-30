@@ -103,6 +103,24 @@ function mapStatus(statusText: string, parcelStatusType: number): ShipmentStatus
   // no dedicated "scheduled" state in ShipmentStatus.
   if (t.includes("will now be delivered")) return "in_transit";
   if (t.includes("delivered")) return "delivered";
+  // DPD marks completed deliveries with several phrasings that never contain the
+  // word "delivered": left in a designated safe place, left with a neighbour, or
+  // collected from a pickup shop. All are terminal delivered states. "left in
+  // your sele[cted safe place]" is the pre-delivery confirmation ("your parcel
+  // will now be left in your selected safe place") — that one is still in
+  // transit, so it must be excluded here (matched below via "will now be").
+  if (
+    t.includes("waiting for you at home") ||
+    t.includes("left in safe place") ||
+    t.includes("left in a safe place") ||
+    (t.includes("safe place") && !t.includes("will now be")) ||
+    t.includes("left with your neighbour") ||
+    t.includes("left with a neighbour") ||
+    t.includes("collected from") ||
+    t.includes("has been collected")
+  ) {
+    return "delivered";
+  }
   if (t.includes("out for delivery")) return "out_for_delivery";
   if (t.includes("on its way") || t.includes("depot") || t.includes("in transit")) return "in_transit";
   if (t.includes("not yet received") || t.includes("received your order details")) return "info_received";
