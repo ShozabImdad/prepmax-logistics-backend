@@ -349,6 +349,26 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       );
       const prevStatus = prev.rows[0]?.current_status ?? null;
 
+      // "delivered" is terminal — a parcel does not un-deliver. When an order is
+      // already delivered but this run's best leg came back lower (typically
+      // because the delivering last-mile leg failed to fetch live this time —
+      // e.g. an Akamai block on the browser adapter — leaving only the earlier
+      // first-mile leg to contribute data), do NOT regress the order. Keep the
+      // delivered status and just refresh last_synced_at. Without this guard a
+      // transient fetch failure would flip a delivered order back to in_transit.
+      if (prevStatus === "delivered" && driveResult.status !== "delivered") {
+        await sql.query("UPDATE orders SET last_synced_at = now() WHERE id = $1", [orderId]);
+        return {
+          orderId,
+          carrier: activeCarrier,
+          status: "synced",
+          normalizedStatus: "delivered",
+          newEvents: totalNewEvents,
+          legs: legResults,
+          handoffCreated,
+        };
+      }
+
       const orderStatus = driveResult.status === "delivered" ? "delivered" : undefined;
       await sql.query(
         `UPDATE orders
