@@ -107,7 +107,20 @@ function mapStatus(statusText: string, delivered: string): ShipmentStatus {
     return "in_transit";
   }
   if (t.includes("booked")) return "info_received";
-  if (t.includes("held") || t.includes("delay") || t.includes("exception")) return "exception";
+  // A failed/attempted delivery is an exception the customer may need to act on
+  // (e.g. reschedule). "no response at consignee address", "attempt" both cover
+  // APX's "Delivery attempted but no response at Consignee address" phrasing.
+  if (
+    t.includes("held") ||
+    t.includes("delay") ||
+    t.includes("exception") ||
+    t.includes("attempt") ||
+    t.includes("no response") ||
+    t.includes("undelivered") ||
+    t.includes("returned")
+  ) {
+    return "exception";
+  }
   console.warn(`APX: unmapped status "${statusText}"`);
   return "unknown";
 }
