@@ -129,6 +129,63 @@ const STATUS_RANK: Record<ShipmentStatus, number> = {
   delivered: 4,
 };
 
+// Carrier-agnostic status inference from a stored event's text. Used only as a
+// FALLBACK when a leg cannot be fetched live (e.g. FedEx is Akamai-blocked from
+// the server) but we already have events stored for it from a prior successful
+// fetch. Keeps an order that a last-mile carrier already delivered from being
+// dragged back to the first-mile leg's status just because the last-mile leg is
+// temporarily unreachable. Deliberately conservative: returns null when nothing
+// matches, so an ambiguous stored event never overrides a live result.
+function inferStatusFromText(text: string): ShipmentStatus | null {
+  const t = text.toLowerCase();
+  // Delivered variants across carriers (DPD safe-place/neighbour, FedEx "left
+  // at front door", generic "delivered"). "will be delivered"/"will now be" are
+  // future ETAs, not completed deliveries — exclude them.
+  if (
+    (t.includes("delivered") && !t.includes("will be delivered") && !t.includes("will now be delivered")) ||
+    t.includes("left at front door") ||
+    t.includes("left in safe place") ||
+    t.includes("left in a safe place") ||
+    t.includes("waiting for you at home") ||
+    t.includes("left in lobby") ||
+    t.includes("left with a neighbour") ||
+    t.includes("left with your neighbour")
+  ) {
+    return "delivered";
+  }
+  if (t.includes("out for delivery") || t.includes("out with courier") || t.includes("with you today")) {
+    return "out_for_delivery";
+  }
+  if (
+    t.includes("attempt") || t.includes("no response") || t.includes("undelivered") ||
+    t.includes("returned to") || t.includes("held") || t.includes("exception")
+  ) {
+    return "exception";
+  }
+  if (
+    t.includes("transit") || t.includes("departed") || t.includes("arrived") ||
+    t.includes("picked up") || t.includes("cleared") || t.includes("at our depot") ||
+    t.includes("on its way")
+  ) {
+    return "in_transit";
+  }
+  return null;
+}
+
+// Latest stored event's inferred status for a leg (fallback path only).
+async function storedFallbackStatus(sql: Sql, leg: Leg): Promise<ShipmentStatus | null> {
+  const { rows } = await sql.query<{ description: string | null; raw_status: string | null }>(
+    `SELECT description, raw_status FROM tracking_events
+      WHERE shipment_leg_id = $1
+      ORDER BY event_time DESC NULLS LAST, created_at DESC
+      LIMIT 1`,
+    [leg.legId],
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return inferStatusFromText(row.raw_status ?? "") ?? inferStatusFromText(row.description ?? "");
+}
+
 // Build a stable de-dupe key for an event within a leg.
 function eventKey(e: TrackingEvent): string {
   const ts = e.timestamp ?? "";
@@ -263,6 +320,9 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
     // on leg 1's status even after the last-mile carrier marked it delivered.
     let statusResult: NormalizedTracking | null = null;
     let statusLeg: Leg | null = null;
+    // Legs whose live fetch failed (error/not_found) — candidates for the
+    // stored-events fallback after the loop.
+    const legsWithoutLiveResult: Leg[] = [];
 
     // Poll every leg — not just the active one.
     for (const leg of legs) {
@@ -275,6 +335,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
           isActive: leg.isActive, status: "error", error: `no adapter for "${leg.carrier}"`,
           userMessage: legUserMessage(leg.carrier, "error"),
         });
+        legsWithoutLiveResult.push(leg);
         continue;
       }
 
@@ -288,6 +349,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
           error: e instanceof Error ? e.message : String(e),
           userMessage: legUserMessage(leg.carrier, "error"),
         });
+        legsWithoutLiveResult.push(leg);
         continue;
       }
 
@@ -297,6 +359,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
           isActive: leg.isActive, status: "not_found",
           userMessage: legUserMessage(leg.carrier, "not_found"),
         });
+        legsWithoutLiveResult.push(leg);
         continue;
       }
 
@@ -336,13 +399,47 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       }
     }
 
+    // The status driver so far comes from live results. Normalize it into a
+    // small shape {status, statusText, leg} so the stored-events fallback below
+    // can compete with it on equal footing.
+    let driveStatus: ShipmentStatus | null = (statusResult ?? activeResult)?.status ?? null;
+    let driveStatusText: string = (statusResult ?? activeResult)?.statusText ?? "";
+    let driveLeg: Leg | null = statusLeg ?? activeLeg;
+
+    // FALLBACK: for legs whose live fetch failed but which already have stored
+    // events (e.g. a FedEx last-mile leg that is Akamai-blocked from the server
+    // yet was captured as Delivered earlier), infer status from the latest
+    // stored event. If that outranks the live driver — or if there is no live
+    // driver at all — let it drive the order. This keeps a delivered last-mile
+    // leg authoritative even while the carrier is temporarily unreachable, and
+    // is the general form of the delivered-terminal guard below.
+    for (const leg of legsWithoutLiveResult) {
+      const fb = await storedFallbackStatus(sql, leg);
+      if (!fb) continue;
+      const better =
+        driveStatus === null ||
+        driveLeg === null ||
+        STATUS_RANK[fb] > STATUS_RANK[driveStatus] ||
+        (STATUS_RANK[fb] === STATUS_RANK[driveStatus] && leg.sequence >= driveLeg.sequence);
+      if (better) {
+        driveStatus = fb;
+        driveLeg = leg;
+        // Preserve the stored event's own text where possible for statusText.
+        const { rows } = await sql.query<{ description: string | null; raw_status: string | null }>(
+          `SELECT description, raw_status FROM tracking_events
+            WHERE shipment_leg_id = $1
+            ORDER BY event_time DESC NULLS LAST, created_at DESC LIMIT 1`,
+          [leg.legId],
+        );
+        driveStatusText = rows[0]?.raw_status || rows[0]?.description || driveStatusText;
+      }
+    }
+
     // Cached order-level status reflects the most ADVANCED leg with data (the
     // parcel's real current position — see statusLeg above), not merely the
     // is_active leg. Falls back to the active leg if that's the only one, and
     // to nothing if no leg returned data.
-    const driveResult = statusResult ?? activeResult;
-    const driveLeg = statusLeg ?? activeLeg;
-    if (driveResult && driveLeg) {
+    if (driveStatus !== null && driveLeg) {
       const prev = await sql.query<{ current_status: string | null }>(
         "SELECT current_status FROM orders WHERE id = $1",
         [orderId],
@@ -356,7 +453,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       // first-mile leg to contribute data), do NOT regress the order. Keep the
       // delivered status and just refresh last_synced_at. Without this guard a
       // transient fetch failure would flip a delivered order back to in_transit.
-      if (prevStatus === "delivered" && driveResult.status !== "delivered") {
+      if (prevStatus === "delivered" && driveStatus !== "delivered") {
         await sql.query("UPDATE orders SET last_synced_at = now() WHERE id = $1", [orderId]);
         return {
           orderId,
@@ -369,7 +466,7 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
         };
       }
 
-      const orderStatus = driveResult.status === "delivered" ? "delivered" : undefined;
+      const orderStatus = driveStatus === "delivered" ? "delivered" : undefined;
       await sql.query(
         `UPDATE orders
             SET current_status = $2,
@@ -377,16 +474,16 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
                 last_synced_at = now()
                 ${orderStatus ? ", order_status = 'delivered'" : ""}
           WHERE id = $1`,
-        [orderId, driveResult.status, driveResult.statusText],
+        [orderId, driveStatus, driveStatusText],
       );
 
-      if (driveResult.status !== prevStatus) {
-        if (driveResult.status === "delivered") {
+      if (driveStatus !== prevStatus) {
+        if (driveStatus === "delivered") {
           emitEvent({ kind: "order_delivered", orderId, branchId: driveLeg.branchId });
-          } else if (driveResult.status === "out_for_delivery") {
-          emitEvent({ kind: "order_out_for_delivery", orderId, branchId: driveLeg.branchId, statusText: driveResult.statusText });
-        } else if (driveResult.status === "exception") {
-          emitEvent({ kind: "order_exception", orderId, branchId: driveLeg.branchId, statusText: driveResult.statusText });
+          } else if (driveStatus === "out_for_delivery") {
+          emitEvent({ kind: "order_out_for_delivery", orderId, branchId: driveLeg.branchId, statusText: driveStatusText });
+        } else if (driveStatus === "exception") {
+          emitEvent({ kind: "order_exception", orderId, branchId: driveLeg.branchId, statusText: driveStatusText });
         }
       }
     } else {
@@ -400,8 +497,9 @@ export async function syncOrder(orderId: string): Promise<SyncResult> {
       carrier: activeCarrier,
       status: "synced",
       // Reflect the leg that actually drives the order status (most advanced
-      // leg with data), so the poller log / sync-all summary aren't misleading.
-      normalizedStatus: (statusResult ?? activeResult)?.status,
+      // leg with data, incl. the stored-events fallback), so the poller log /
+      // sync-all summary aren't misleading.
+      normalizedStatus: driveStatus ?? undefined,
       newEvents: totalNewEvents,
       handoffCreated,
       legs: legResults,
