@@ -6,7 +6,7 @@
 // pass a `run` that already carries the right branch context.
 
 import type { Sql } from "../../db/pool.js";
-import { pushToBranch } from "./sse.js";
+import { pushToBranch, pushToCustomer } from "./sse.js";
 import type { SendResult } from "./mailer.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
@@ -128,13 +128,24 @@ export async function createCustomerNotification(
   branchId: string,
   input: { customerId: string; type: string; message: string; orderId?: string | null },
 ): Promise<void> {
-  await run(async (sql) => {
-    await sql.query(
+  const row = await run(async (sql) => {
+    const { rows } = await sql.query(
       `INSERT INTO notifications (branch_id, customer_id, type, order_id, message)
-       VALUES ($1,$2,$3,$4,$5)`,
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING type, message, order_id, created_at`,
       [branchId, input.customerId, input.type, input.orderId ?? null, input.message],
     );
+    return rows[0];
   });
+  // Live push to this customer's open stream(s) only (best-effort).
+  if (row) {
+    pushToCustomer(input.customerId, "notification", {
+      type: row.type,
+      message: row.message,
+      orderId: row.order_id,
+      createdAt: row.created_at,
+    });
+  }
 }
 
 /** List notifications for the current customer principal — explicitly

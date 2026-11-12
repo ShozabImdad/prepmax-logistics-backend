@@ -16,7 +16,7 @@ import {
 } from "./queries.js";
 
 import { createBranchNotification } from "../notifications/service.js";
-import { addSseClient } from "../notifications/sse.js";
+import { addCustomerSseClient, openSseStream } from "../notifications/sse.js";
 
 function handleQuoteError(err: unknown, res: Response): void {
   if (err instanceof QuoteError) {
@@ -45,20 +45,7 @@ portalQuoteRouter.get("/stream", requireCustomer, (req, res) => {
     return;
   }
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
-
-  const remove = addSseClient(cust.branchId, cust.customerId, res);
-  const heartbeat = setInterval(() => {
-    try { res.write(": ping\n\n"); } catch { /* closed */ }
-  }, 25_000);
-
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    remove();
-  });
+  openSseStream(req, res, () => addCustomerSseClient(cust.branchId, cust.customerId, res));
 });
 
 // ── CUSTOMER: request a quote ───────────────────────────────────────────────

@@ -4,7 +4,7 @@
 import type { Sql } from "../../db/pool.js";
 import { publicId } from "../../lib/ids.js";
 import type { CreateComplaintInput, UpdateComplaintInput } from "./schema.js";
-import { pushToBranch } from "../notifications/sse.js";
+import { pushToBranch, pushToCustomer } from "../notifications/sse.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -132,8 +132,8 @@ export async function updateComplaint(
   input: UpdateComplaintInput,
 ): Promise<{ orderId: string; branchId: string } & ComplaintRow> {
   return run(async (sql) => {
-    const { rows: existing } = await sql.query<{ id: string; order_id: string; branch_id: string }>(
-      "SELECT id, order_id, branch_id FROM complaints WHERE public_id = $1",
+    const { rows: existing } = await sql.query<{ id: string; order_id: string; branch_id: string; customer_id: string }>(
+      "SELECT id, order_id, branch_id, customer_id FROM complaints WHERE public_id = $1",
       [complaintPublicId],
     );
     const current = existing[0];
@@ -165,11 +165,13 @@ export async function updateComplaint(
     );
     const result = { orderId: current.order_id, branchId: current.branch_id, ...mapRow(full[0]!) };
 
-    pushToBranch(current.branch_id, "complaint_message", {
+    const updateEvent = {
       complaintPublicId,
       sender: "staff" as const,
       statusChanged: input.status !== undefined,
-    });
+    };
+    pushToBranch(current.branch_id, "complaint_message", updateEvent);
+    pushToCustomer(current.customer_id, "complaint_message", updateEvent);
 
     return result;
   });
@@ -238,10 +240,10 @@ export async function addComplaintMessage(
   return run(async (sql) => {
     const complaintId = await resolveComplaintId(sql, complaintPublicId);
     const pid = publicId();
-    const { rows: branchRows } = await sql.query<{ branch_id: string }>(
+    const { rows: branchRows } = await sql.query<{ branch_id: string; customer_id: string }>(
       `INSERT INTO complaint_messages (public_id, branch_id, complaint_id, sender, author_id, body)
        SELECT $1, c.branch_id, $2, $3, $4, $5 FROM complaints c WHERE c.id = $2
-       RETURNING branch_id`,
+       RETURNING branch_id, (SELECT customer_id FROM complaints WHERE id = $2) AS customer_id`,
       [pid, complaintId, sender, authorId, body],
     );
     const { rows } = await sql.query(
@@ -255,15 +257,12 @@ export async function addComplaintMessage(
     );
     const message = mapMessageRow(rows[0]!);
 
-    // Reuses the same branch-scoped SSE hub notifications already push
-    // through (see modules/notifications/sse.ts). Any client connected on
-    // this branch — staff via /api/notifications/stream, customers via
-    // /api/portal/complaints/stream — gets told to refetch this thread.
-    const branchId = branchRows[0]!.branch_id;
-    pushToBranch(branchId, "complaint_message", {
-      complaintPublicId,
-      sender,
-    });
+    // Staff on this branch (via /api/notifications/stream) and ONLY the
+    // customer who owns this complaint (via their portal stream) are told
+    // to refetch the thread.
+    const messageEvent = { complaintPublicId, sender };
+    pushToBranch(branchRows[0]!.branch_id, "complaint_message", messageEvent);
+    pushToCustomer(branchRows[0]!.customer_id, "complaint_message", messageEvent);
 
     return message;
   });

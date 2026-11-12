@@ -4,7 +4,7 @@
 import type { Sql } from "../../db/pool.js";
 import { publicId } from "../../lib/ids.js";
 import type { CreateQuoteInput, UpdateQuoteInput, QuoteBoxInput } from "./schema.js";
-import { pushToBranch } from "../notifications/sse.js";
+import { pushToBranch, pushToCustomer } from "../notifications/sse.js";
 
 type Run = <T>(fn: (sql: Sql) => Promise<T>) => Promise<T>;
 
@@ -132,8 +132,8 @@ export async function updateQuote(
   input: UpdateQuoteInput,
 ): Promise<QuoteRow> {
   return run(async (sql) => {
-    const { rows: existing } = await sql.query<{ id: string; branch_id: string }>(
-      "SELECT id, branch_id FROM quotes WHERE public_id = $1",
+    const { rows: existing } = await sql.query<{ id: string; branch_id: string; customer_id: string }>(
+      "SELECT id, branch_id, customer_id FROM quotes WHERE public_id = $1",
       [quotePublicId],
     );
     if (!existing[0]) throw new QuoteError(404, "Quote not found");
@@ -167,11 +167,13 @@ export async function updateQuote(
     ]);
     const result = mapRow(full[0]!);
 
-    pushToBranch(existing[0].branch_id, "quote_message", {
+    const updateEvent = {
       quotePublicId,
       sender: "staff" as const,
       statusChanged: input.status !== undefined || input.quotedPrice !== undefined,
-    });
+    };
+    pushToBranch(existing[0].branch_id, "quote_message", updateEvent);
+    pushToCustomer(existing[0].customer_id, "quote_message", updateEvent);
 
     return result;
   });
@@ -242,10 +244,10 @@ export async function addQuoteMessage(
   return run(async (sql) => {
     const quoteId = await resolveQuoteId(sql, quotePublicId);
     const pid = publicId();
-    const { rows: branchRows } = await sql.query<{ branch_id: string }>(
+    const { rows: branchRows } = await sql.query<{ branch_id: string; customer_id: string }>(
       `INSERT INTO quote_messages (public_id, branch_id, quote_id, sender, author_id, body)
        SELECT $1, q.branch_id, $2, $3, $4, $5 FROM quotes q WHERE q.id = $2
-       RETURNING branch_id`,
+       RETURNING branch_id, (SELECT customer_id FROM quotes WHERE id = $2) AS customer_id`,
       [pid, quoteId, sender, authorId, body],
     );
     const { rows } = await sql.query(
@@ -259,10 +261,9 @@ export async function addQuoteMessage(
     );
     const message = mapMessageRow(rows[0]!);
 
-    pushToBranch(branchRows[0]!.branch_id, "quote_message", {
-      quotePublicId,
-      sender,
-    });
+    const messageEvent = { quotePublicId, sender };
+    pushToBranch(branchRows[0]!.branch_id, "quote_message", messageEvent);
+    pushToCustomer(branchRows[0]!.customer_id, "quote_message", messageEvent);
 
     return message;
   });

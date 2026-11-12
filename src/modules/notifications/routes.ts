@@ -6,7 +6,7 @@ import { asyncHandler } from "../../lib/http.js";
 import { requireStaff } from "../../middleware/auth.js";
 import { isStaff } from "../auth/types.js";
 import { listNotifications, unreadCount, markAllRead } from "./service.js";
-import { addSseClient } from "./sse.js";
+import { addStaffSseClient, openSseStream } from "./sse.js";
 
 export const notificationRouter: Router = Router();
 
@@ -39,23 +39,9 @@ notificationRouter.get("/stream", requireStaff, (req, res) => {
     return;
   }
   // branch_manager subscribes to their own branch; super_admin (branchId
-  // null) subscribes to all branches — addSseClient/pushToBranch both
+  // null) subscribes to all branches — addStaffSseClient/pushToBranch both
   // understand null as "every branch".
   const branchId = staff.branchId;
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders?.();
-
-  const remove = addSseClient(branchId, staff.userId, res);
-  // heartbeat to keep the connection alive through proxies
-  const heartbeat = setInterval(() => {
-    try { res.write(": ping\n\n"); } catch { /* closed */ }
-  }, 25_000);
-
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    remove();
-  });
+  openSseStream(req, res, () => addStaffSseClient(branchId, staff.userId, res));
 });

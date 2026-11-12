@@ -10,7 +10,7 @@ import { accountsRouter } from "./modules/accounts/routes.js";
 import { orderRouter, portalOrderRouter } from "./modules/orders/routes.js";
 import { documentRouter, portalDocumentRouter } from "./modules/documents/routes.js";
 import { notificationRouter } from "./modules/notifications/routes.js";
-import { portalNotificationRouter } from "./modules/notifications/portal-routes.js";
+import { portalNotificationRouter, portalStreamRouter } from "./modules/notifications/portal-routes.js";
 import { publicTrackingRouter } from "./modules/tracking/routes.js";
 // account-requests module removed — customers are created manually by staff only.
 import { permissionsRouter } from "./modules/permissions/routes.js";
@@ -50,6 +50,7 @@ export function createApp() {
   app.use("/api/portal/orders", portalDocumentRouter); // /:publicId/receipt.pdf
   app.use("/api/notifications", notificationRouter);
   app.use("/api/portal/notifications", portalNotificationRouter);
+  app.use("/api/portal/stream", portalStreamRouter);
   app.use("/api/permissions", permissionsRouter);
   app.use("/api/staff", staffRouter);
   app.use("/api/analytics", analyticsRouter);
